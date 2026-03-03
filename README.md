@@ -2,6 +2,7 @@
 
 A comprehensive collection of Claude Code skills for DevOps engineers, providing generators and validators for infrastructure automation, CI/CD pipelines, container orchestration, and observability tooling.
 
+[![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge-flat.svg)](https://github.com/hesreallyhim/awesome-claude-code)
 ## What are Claude Code Skills?
 
 Skills are reusable prompt templates that help Claude provide expert guidance on specific topics. When you invoke a skill, Claude assumes the role of an expert in that domain and provides detailed, actionable advice with automatic validation.
@@ -133,6 +134,12 @@ To automatically install for your team, add to your project's `.claude/settings.
 ```
 
 When team members trust the repository folder, Claude Code automatically installs the marketplace.
+
+Now available for Codex desktop 🎉
+
+```
+$skill-installer install https://github.com/akin-ozer/cc-devops-skills/tree/main/devops-skills-plugin/skills
+```
 
 ## How to Use
 
