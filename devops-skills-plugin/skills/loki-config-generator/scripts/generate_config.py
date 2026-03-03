@@ -8,7 +8,8 @@ Supports monolithic, simple scalable, and microservices modes with various stora
 
 import argparse
 import sys
-from typing import Dict, Optional
+from datetime import date
+from typing import Optional, Sequence
 
 
 class LokiConfigGenerator:
@@ -54,23 +55,64 @@ server:
   graceful_shutdown_timeout: 30s
 """
 
+    @staticmethod
+    def _parse_schema_from_date(from_date: str) -> date:
+        """Parse schema period start date in ISO format."""
+        try:
+            return date.fromisoformat(str(from_date))
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid schema period date '{from_date}'. Expected YYYY-MM-DD."
+            ) from exc
+
+    def _validate_schema_periods(self, from_dates: Sequence[str]) -> None:
+        """Validate schema periods and enforce transition guardrails."""
+        if not from_dates:
+            raise ValueError("At least one schema period date is required.")
+
+        parsed_dates = [self._parse_schema_from_date(value) for value in from_dates]
+        today = date.today()
+
+        for index in range(1, len(parsed_dates)):
+            if parsed_dates[index] <= parsed_dates[index - 1]:
+                raise ValueError("Schema period dates must be strictly increasing.")
+            if parsed_dates[index] <= today:
+                raise ValueError(
+                    "Schema transition periods must be future-dated at rollout time."
+                )
+
     def _generate_schema_config(
         self,
         storage_type: str,
         from_date: str = "2025-01-01",
+        transition_from_dates: Optional[Sequence[str]] = None,
     ) -> str:
         """Generate schema configuration."""
-        return f"""
-schema_config:
-  configs:
-    - from: {from_date}
-      store: tsdb
-      object_store: {storage_type}
-      schema: v13
-      index:
-        prefix: loki_index_
-        period: 24h
-"""
+        from_dates = [from_date]
+        if transition_from_dates:
+            from_dates.extend(transition_from_dates)
+
+        self._validate_schema_periods(from_dates)
+
+        lines = [
+            "",
+            "schema_config:",
+            "  configs:",
+        ]
+        for schema_from in from_dates:
+            lines.extend(
+                [
+                    f"    - from: {schema_from}",
+                    "      store: tsdb",
+                    f"      object_store: {storage_type}",
+                    "      schema: v13",
+                    "      index:",
+                    "        prefix: loki_index_",
+                    "        period: 24h",
+                ]
+            )
+
+        return "\n".join(lines) + "\n"
 
     def _generate_limits_config(
         self,
@@ -628,6 +670,8 @@ common:
         max_streams = kwargs.get("max_streams") or 10000
         retention_days = kwargs.get("retention_days") or 30
         pattern_ingester = kwargs.get("pattern_ingester", True)
+        schema_from_date = kwargs.get("schema_from_date", "2025-01-01")
+        schema_transition_dates = kwargs.get("schema_transition_dates") or []
 
         storage_type = "filesystem" if storage == "filesystem" else "s3" if storage == "s3" else "gcs" if storage == "gcs" else "azure"
 
@@ -639,7 +683,11 @@ common:
         else:
             storage_kwargs.setdefault("ring_store", "memberlist")
         config += self.storage_backends[storage](**storage_kwargs)
-        config += self._generate_schema_config(storage_type)
+        config += self._generate_schema_config(
+            storage_type,
+            from_date=schema_from_date,
+            transition_from_dates=schema_transition_dates,
+        )
         config += self._generate_limits_config(ingestion_rate, max_streams, retention_days)
         if pattern_ingester:
             config += self._generate_pattern_ingester_config()
@@ -666,6 +714,8 @@ common:
         thanos_storage = kwargs.get("thanos_storage", False)
         time_sharding = kwargs.get("time_sharding", False)
         zone_awareness = kwargs.get("zone_awareness", False)
+        schema_from_date = kwargs.get("schema_from_date", "2025-01-01")
+        schema_transition_dates = kwargs.get("schema_transition_dates") or []
 
         storage_type = "filesystem" if storage == "filesystem" else "s3" if storage == "s3" else "gcs" if storage == "gcs" else "azure"
 
@@ -690,7 +740,11 @@ common:
         else:
             config += self.storage_backends[storage](**storage_kwargs)
 
-        config += self._generate_schema_config(storage_type)
+        config += self._generate_schema_config(
+            storage_type,
+            from_date=schema_from_date,
+            transition_from_dates=schema_transition_dates,
+        )
         limits_config = self._generate_limits_config(ingestion_rate, max_streams, retention_days)
         if otlp_enabled:
             limits_config = limits_config.rstrip() + self._generate_otlp_config()
@@ -753,6 +807,8 @@ query_range:
         thanos_storage = kwargs.get("thanos_storage", False)
         limits_dry_run = kwargs.get("limits_dry_run", False)
         zone_awareness = kwargs.get("zone_awareness", False)
+        schema_from_date = kwargs.get("schema_from_date", "2025-01-01")
+        schema_transition_dates = kwargs.get("schema_transition_dates") or []
 
         storage_type = "filesystem" if storage == "filesystem" else "s3" if storage == "s3" else "gcs" if storage == "gcs" else "azure"
 
@@ -779,7 +835,11 @@ query_range:
         else:
             config += self.storage_backends[storage](**storage_kwargs)
 
-        config += self._generate_schema_config(storage_type)
+        config += self._generate_schema_config(
+            storage_type,
+            from_date=schema_from_date,
+            transition_from_dates=schema_transition_dates,
+        )
 
         # Enhanced limits for microservices
         config += f"""
@@ -901,6 +961,21 @@ def main():
     parser.add_argument("--max-streams", type=int, help="Max streams per tenant")
     parser.add_argument("--retention-days", type=int, help="Log retention period (days)")
     parser.add_argument("--max-concurrent", type=int, help="Max concurrent queries per querier")
+    parser.add_argument(
+        "--schema-from-date",
+        default="2025-01-01",
+        help="Schema period start date for existing data (YYYY-MM-DD, default: 2025-01-01)",
+    )
+    parser.add_argument(
+        "--schema-transition-from",
+        action="append",
+        dest="schema_transition_dates",
+        default=[],
+        help=(
+            "Additional schema period start date (YYYY-MM-DD). "
+            "Repeat for multiple transition periods; each must be future-dated."
+        ),
+    )
 
     # Storage-specific options
     parser.add_argument("--bucket", help="S3/GCS bucket name")
@@ -1028,6 +1103,8 @@ def main():
             max_streams=args.max_streams,
             retention_days=args.retention_days,
             max_concurrent=args.max_concurrent,
+            schema_from_date=args.schema_from_date,
+            schema_transition_dates=args.schema_transition_dates,
             bucket=args.bucket or "loki-bucket",
             container=args.container or "loki-container",
             region=args.region,

@@ -1,6 +1,8 @@
 # Terraform and provider version constraints
 
 terraform {
+  # Baseline constraint for general and ephemeral-only configurations.
+  # If using write-only arguments (`*_wo`), bump to `>= 1.11, < 2.0`.
   required_version = ">= 1.10, < 2.0"
 
   required_providers {

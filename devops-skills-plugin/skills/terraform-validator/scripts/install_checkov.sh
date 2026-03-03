@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 DEFAULT_INSTALL_DIR="${HOME}/.local/checkov-venv"
 INSTALL_DIR="${CHECKOV_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 WRAPPER_LINK="${HOME}/.local/bin/checkov"
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 AUTO_YES="false"
 FORCE_RECREATE="false"
@@ -152,8 +152,8 @@ INSTALL_SCRIPT_PATH="$SCRIPT_PATH"
 
 if [ ! -d "\$VENV_DIR" ]; then
     echo "ERROR: Checkov virtual environment not found at: \$VENV_DIR" >&2
-    if [ -f "$INSTALL_SCRIPT_PATH" ]; then
-        echo "Run: bash \"$INSTALL_SCRIPT_PATH\" install" >&2
+    if [ -f "\$INSTALL_SCRIPT_PATH" ]; then
+        echo "Run: bash \"\$INSTALL_SCRIPT_PATH\" install" >&2
     else
         echo "Run install_checkov.sh install from terraform-validator/scripts" >&2
     fi
@@ -396,5 +396,7 @@ main() {
     esac
 }
 
-# Run main function
-main "$@"
+# Run main function only when executed directly.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

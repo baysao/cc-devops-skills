@@ -673,6 +673,8 @@ Terragrunt Stacks allow you to define infrastructure blueprints that generate un
 
 **Use when:** Creating a reusable infrastructure blueprint
 
+Catalog units expect `values.name` as the base resource identifier from each stack unit.
+
 ```hcl
 # terragrunt.stack.hcl
 locals {
@@ -690,7 +692,7 @@ unit "vpc" {
   path   = "vpc"
   no_dot_terragrunt_stack = local.use_direct_paths
   values = {
-    vpc_name    = "${local.environment}-vpc"
+    name        = "${local.environment}-vpc"
     cidr        = "10.0.0.0/16"
     environment = local.environment
   }
@@ -701,7 +703,7 @@ unit "database" {
   path   = "database"
   no_dot_terragrunt_stack = local.use_direct_paths
   values = {
-    db_name     = "${local.environment}-db"
+    name        = "${local.environment}-db"
     engine      = "postgres"
     vpc_path    = "../vpc"
     environment = local.environment
@@ -719,8 +721,8 @@ unit "vpc" {
   source = "git::git@github.com:acme/infrastructure-catalog.git//units/vpc?ref=v1.0.0"
   path   = "vpc"
   values = {
-    vpc_name = "main"
-    cidr     = "10.0.0.0/16"
+    name = "main"
+    cidr = "10.0.0.0/16"
   }
 }
 
@@ -728,6 +730,7 @@ unit "database" {
   source = "git::git@github.com:acme/infrastructure-catalog.git//units/database?ref=v1.0.0"
   path   = "database"
   values = {
+    name     = "main-db"
     engine   = "postgres"
     version  = "15"
     vpc_path = "../vpc"

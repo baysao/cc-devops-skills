@@ -156,6 +156,83 @@ ANSIBLE_POSIX_MODULES=(
 NON_FQCN_FOUND=0
 declare -A FOUND_MODULES
 
+scan_inline_value_module_file() {
+    local module="$1"
+    local file_path="$2"
+    local implicit_tasks=0
+
+    # Task/handler files are usually top-level task lists without a tasks: key.
+    if [[ "$file_path" == *"/tasks/"* ]] || [[ "$file_path" == *"/handlers/"* ]]; then
+        implicit_tasks=1
+    fi
+
+    awk -v module="$module" -v implicit_tasks="$implicit_tasks" '
+        function indent_len(text) {
+            match(text, /^[[:space:]]*/)
+            return RLENGTH
+        }
+
+        BEGIN {
+            in_task_section = 0
+            task_section_indent = -1
+            task_item_indent = -1
+        }
+
+        {
+            line = $0
+
+            if (line ~ /^[[:space:]]*$/ || line ~ /^[[:space:]]*#/) {
+                next
+            }
+
+            current_indent = indent_len(line)
+
+            # Track explicit task-bearing sections in playbooks.
+            if (line ~ /^[[:space:]]*(tasks|pre_tasks|post_tasks|handlers|block|rescue|always):[[:space:]]*(#.*)?$/) {
+                in_task_section = 1
+                task_section_indent = current_indent
+                task_item_indent = -1
+                next
+            }
+
+            if (in_task_section && current_indent <= task_section_indent && line !~ /^[[:space:]]*-[[:space:]]/) {
+                in_task_section = 0
+                task_section_indent = -1
+                task_item_indent = -1
+            }
+
+            if (line ~ /^[[:space:]]*-[[:space:]]/) {
+                task_item_indent = current_indent
+            }
+
+            module_pattern = "^[[:space:]]+" module ":[[:space:]]+[^#[:space:]].*$"
+            if (line ~ module_pattern) {
+                if ((in_task_section || implicit_tasks == 1) &&
+                    task_item_indent >= 0 &&
+                    current_indent == (task_item_indent + 2)) {
+                    printf("%d:%s\n", NR, line)
+                }
+            }
+        }
+    ' "$file_path" 2>/dev/null || true
+}
+
+scan_inline_value_module_directory() {
+    local module="$1"
+    local directory="$2"
+
+    while IFS= read -r yaml_file; do
+        local file_matches
+        file_matches=$(scan_inline_value_module_file "$module" "$yaml_file")
+        if [ -n "$file_matches" ]; then
+            while IFS= read -r line_match; do
+                [ -n "$line_match" ] || continue
+                printf '%s:%s\n' "$yaml_file" "$line_match"
+            done <<< "$file_matches"
+        fi
+    done < <(find "$directory" -type f \( -name "*.yml" -o -name "*.yaml" \) ! -path "*/.git/*" 2>/dev/null | sort)
+}
+
 # Function to check for non-FQCN module usage
 check_module() {
     local module="$1"
@@ -172,13 +249,18 @@ check_module() {
         #   e.g. "      apt:" — but NOT "      group: root" (parameter with a value)
         local r2
         r2=$(grep -n -E "^\s+${module}:\s*(#.*)?$" "$TARGET_ABS" 2>/dev/null | grep -v "${fqcn}" || true)
-        results=$(printf '%s\n%s' "$r1" "$r2" | grep -v "^$" | sort -u || true)
+        # Pattern 3: inline-value form under task items, e.g. "      shell: echo hello"
+        local r3
+        r3=$(scan_inline_value_module_file "$module" "$TARGET_ABS")
+        results=$(printf '%s\n%s\n%s' "$r1" "$r2" "$r3" | grep -v "^$" | sort -u || true)
     else
         local r1
         r1=$(grep -r -n -E "^\s*-\s+${module}:" "$TARGET_ABS" --include="*.yml" --include="*.yaml" 2>/dev/null | grep -v ".git/" | grep -v "${fqcn}" || true)
         local r2
         r2=$(grep -r -n -E "^\s+${module}:\s*(#.*)?$" "$TARGET_ABS" --include="*.yml" --include="*.yaml" 2>/dev/null | grep -v ".git/" | grep -v "${fqcn}" || true)
-        results=$(printf '%s\n%s' "$r1" "$r2" | grep -v "^$" | sort -u || true)
+        local r3
+        r3=$(scan_inline_value_module_directory "$module" "$TARGET_ABS")
+        results=$(printf '%s\n%s\n%s' "$r1" "$r2" "$r3" | grep -v "^$" | sort -u || true)
     fi
 
     if [ -n "$results" ]; then

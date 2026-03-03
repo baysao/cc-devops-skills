@@ -581,7 +581,7 @@ spec:
 ```
 
 **Common mistakes:**
-- Use `autoscaling/v2` (GA since K8s 1.26); `autoscaling/v2beta2` is deprecated
+- Use `autoscaling/v2` (available since Kubernetes v1.23, stable); `autoscaling/v2beta2` is deprecated
 - HPA requires `resources.requests` to be set on containers; without requests, CPU/memory utilization cannot be calculated
 
 ---

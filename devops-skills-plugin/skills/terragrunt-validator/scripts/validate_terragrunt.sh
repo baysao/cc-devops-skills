@@ -274,11 +274,46 @@ validate_terragrunt() {
         return 1
     fi
 
+    local mode
+    mode=$(detect_target_mode)
+    local -a validate_cmd=(terragrunt hcl validate)
+
+    case "$mode" in
+        multi)
+            validate_cmd+=(--all)
+            print_info "Multi-unit directory detected, validating all units..."
+            ;;
+        single)
+            print_info "Single-unit directory detected, validating current unit..."
+            ;;
+        root-only)
+            print_warning "No terragrunt.hcl in current directory for syntax validation"
+            print_info "Root-only directory detected (root.hcl). Run this script in a unit directory or keep multi-unit layout."
+            return 0
+            ;;
+        *)
+            print_error "No Terragrunt configuration files found in $TARGET_DIR"
+            return 1
+            ;;
+    esac
+
     local output
-    if output=$(terragrunt hcl validate 2>&1); then
+    if output=$("${validate_cmd[@]}" 2>&1); then
         print_success "Terragrunt HCL syntax is valid"
     else
         local hcl_exit=$?
+
+        # Compatibility fallback for Terragrunt variants where hcl validate
+        # exists but does not accept --all.
+        if [[ "$mode" == "multi" ]] && echo "$output" | grep -qi "unknown flag.*--all"; then
+            print_warning "Terragrunt does not support 'hcl validate --all'; falling back to single-command validation"
+            if output=$(terragrunt hcl validate 2>&1); then
+                print_success "Terragrunt HCL syntax is valid (fallback path)"
+                return 0
+            fi
+            hcl_exit=$?
+        fi
+
         # Command not found (127) or unknown command means pre-0.93 Terragrunt.
         # Fall back to format check as a best-effort proxy — it at least catches
         # structural HCL errors even though it is not a pure syntax validator.

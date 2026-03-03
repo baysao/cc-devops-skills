@@ -42,29 +42,67 @@ STANDARD_API_GROUPS = {
     "storage.k8s.io",
 }
 
+HELM_TEMPLATE_HINTS = (
+    ".Values",
+    ".Release",
+    ".Chart",
+    ".Capabilities",
+    ".Files",
+    ".Template",
+    "include ",
+    "tpl ",
+    "required ",
+    "toYaml",
+    "nindent",
+    "indent",
+    "{{- if",
+    "{{ if",
+    "{{- with",
+    "{{ with",
+    "{{- range",
+    "{{ range",
+    "{{- end",
+    "{{ end",
+)
+
+
+def looks_like_unrendered_helm_template(content, error_message):
+    """Classify YAML parse failures that are likely caused by raw Helm templates."""
+    if "{{" not in content or "}}" not in content:
+        return False
+
+    if any(marker in content for marker in HELM_TEMPLATE_HINTS):
+        return True
+
+    # PyYAML commonly reports this when encountering template actions in scalar positions.
+    return "unhashable key" in error_message
+
 
 def parse_yaml_file(file_path):
     """Parse a YAML file that may contain multiple documents."""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}", file=sys.stderr)
+        return None
 
-        # Detect unrendered Helm templates before attempting YAML parse.
-        # Go template directives ({{ ... }}) produce invalid YAML that causes
-        # confusing PyYAML errors instead of an actionable message.
-        if "{{" in content:
+    try:
+        return list(yaml.safe_load_all(content))
+    except yaml.YAMLError as e:
+        err = str(e)
+        if looks_like_unrendered_helm_template(content, err):
             print(
-                f"Error: {file_path} appears to be an unrendered Helm template "
-                f"(contains Go template directives '{{{{ ... }}}}'). "
+                f"Error: {file_path} appears to be an unrendered Helm template. "
                 f"Run 'helm template <release> <chart> --output-dir ./rendered' "
                 f"first, then pass the rendered files to this script.",
                 file=sys.stderr,
             )
-            return None
-
-        return list(yaml.safe_load_all(content))
+        else:
+            print(f"Error parsing YAML file {file_path}: {e}", file=sys.stderr)
+        return None
     except Exception as e:
-        print(f"Error parsing YAML file {file_path}: {e}", file=sys.stderr)
+        print(f"Unexpected error while parsing YAML file {file_path}: {e}", file=sys.stderr)
         return None
 
 

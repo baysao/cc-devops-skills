@@ -797,7 +797,7 @@ Your Name
 
 ## Testing Best Practices
 
-See the molecule configuration and testing section in the main skill.md for comprehensive testing guidance.
+See the molecule configuration and testing section in the main SKILL.md for comprehensive testing guidance.
 
 ## Performance Tips
 

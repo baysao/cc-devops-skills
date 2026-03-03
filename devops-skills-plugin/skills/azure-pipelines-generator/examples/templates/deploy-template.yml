@@ -27,14 +27,20 @@ parameters:
     type: string
     default: 'webapp'
 
-  - name: approvalRequired
+  - name: approvalReminder
     type: boolean
     default: true
+
+  # Deprecated alias. Use approvalReminder instead.
+  - name: approvalRequired
+    type: boolean
+    default: false
 
 stages:
   - stage: Deploy_${{ parameters.environment }}
     displayName: 'Deploy to ${{ parameters.environment }}'
-    dependsOn: ${{ parameters.dependsOn }}
+    ${{ if gt(length(parameters.dependsOn), 0) }}:
+      dependsOn: ${{ parameters.dependsOn }}
     condition: ${{ parameters.stageCondition }}
     jobs:
       - deployment: Deploy${{ parameters.environment }}
@@ -47,10 +53,11 @@ stages:
           runOnce:
             preDeploy:
               steps:
-                - ${{ if eq(parameters.approvalRequired, true) }}:
+                - ${{ if or(eq(parameters.approvalReminder, true), eq(parameters.approvalRequired, true)) }}:
                     - script: |
-                        echo "Approval required: configure environment approvals/checks in Azure DevOps for '${{ parameters.environment }}'."
-                      displayName: 'Approval Reminder'
+                        echo "Reminder only: YAML does not enforce approvals."
+                        echo "Configure Environment -> Approvals and checks in Azure DevOps for '${{ parameters.environment }}'."
+                      displayName: 'Approval Reminder (Informational Only)'
 
                 - script: echo "Pre-deployment validation for ${{ parameters.environment }}"
                   displayName: 'Pre-Deployment Checks'

@@ -294,6 +294,142 @@ STUB
   create_common_stubs "$bin_dir"
 }
 
+# ---------------------------------------------------------------------------
+# Helper: multi-unit root has no terragrunt.hcl, so plain `hcl validate`
+# should fail; `hcl validate --all` should pass.
+# ---------------------------------------------------------------------------
+setup_multi_requires_all_for_hcl_validate() {
+  local root_dir="$1"
+  local bin_dir="$root_dir/bin"
+  mkdir -p "$bin_dir" "$root_dir/infra/dev/vpc"
+  cat > "$root_dir/infra/dev/vpc/terragrunt.hcl" <<'EOF'
+locals {}
+EOF
+
+  cat > "$bin_dir/terragrunt" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--strict-mode" ]]; then shift; fi
+
+case "${1:-}" in
+  --version)
+    echo "terragrunt version v0.99.4"
+    exit 0
+    ;;
+  hcl)
+    if [[ "${2:-}" == "validate" && "${3:-}" == "--all" ]]; then
+      exit 0
+    fi
+    if [[ "${2:-}" == "validate" ]]; then
+      echo "no terragrunt.hcl in current directory"
+      exit 1
+    fi
+    exit 0
+    ;;
+  dag)
+    exit 0
+    ;;
+  run)
+    exit 0
+    ;;
+esac
+
+exit 0
+STUB
+  chmod +x "$bin_dir/terragrunt"
+  create_common_stubs "$bin_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: simulate Terragrunt variant where `hcl validate --all` is unsupported
+# but plain `hcl validate` succeeds.
+# ---------------------------------------------------------------------------
+setup_multi_unknown_flag_fallback_case() {
+  local root_dir="$1"
+  local bin_dir="$root_dir/bin"
+  local calls_file="$root_dir/terragrunt.calls"
+  mkdir -p "$bin_dir" "$root_dir/infra/dev/vpc"
+  cat > "$root_dir/infra/terragrunt.hcl" <<'EOF'
+locals {}
+EOF
+  cat > "$root_dir/infra/dev/vpc/terragrunt.hcl" <<'EOF'
+locals {}
+EOF
+  : > "$calls_file"
+
+  cat > "$bin_dir/terragrunt" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+echo "\$*" >> "$calls_file"
+if [[ "\${1:-}" == "--strict-mode" ]]; then shift; fi
+
+case "\${1:-}" in
+  --version)
+    echo "terragrunt version v0.99.4"
+    exit 0
+    ;;
+  hcl)
+    if [[ "\${2:-}" == "validate" && "\${3:-}" == "--all" ]]; then
+      echo "unknown flag: --all" >&2
+      exit 1
+    fi
+    if [[ "\${2:-}" == "validate" ]]; then
+      exit 0
+    fi
+    exit 0
+    ;;
+  dag)
+    exit 0
+    ;;
+  run)
+    exit 0
+    ;;
+esac
+
+exit 0
+EOF
+  chmod +x "$bin_dir/terragrunt"
+  create_common_stubs "$bin_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: root-only Terragrunt layout (root.hcl only, no unit terragrunt.hcl).
+# ---------------------------------------------------------------------------
+setup_root_only_case() {
+  local root_dir="$1"
+  local bin_dir="$root_dir/bin"
+  mkdir -p "$bin_dir" "$root_dir/root-only"
+  cat > "$root_dir/root-only/root.hcl" <<'EOF'
+locals {}
+EOF
+
+  cat > "$bin_dir/terragrunt" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--strict-mode" ]]; then shift; fi
+
+case "${1:-}" in
+  --version)
+    echo "terragrunt version v0.99.4"
+    exit 0
+    ;;
+  hcl)
+    exit 0
+    ;;
+  dag)
+    exit 0
+    ;;
+  run)
+    exit 0
+    ;;
+esac
+
+exit 0
+STUB
+  chmod +x "$bin_dir/terragrunt"
+  create_common_stubs "$bin_dir"
+}
+
 # Test 4: validate_inputs() runs without SKIP_INPUT_VALIDATION and succeeds.
 TMP_DIR="$(mktemp -d)"
 setup_all_pass_multi_case "$TMP_DIR"
@@ -322,6 +458,46 @@ setup_hcl_validate_failure_case "$TMP_DIR"
 if PATH="$TMP_DIR/bin:$PATH" SKIP_PLAN=true SKIP_SECURITY=true SKIP_LINT=true SKIP_INPUT_VALIDATION=true \
      bash "$VALIDATOR" "$TMP_DIR/single" >/dev/null 2>&1; then
   echo "FAIL: expected non-zero exit when hcl validate reports a syntax error"
+  exit 1
+fi
+cleanup
+
+# Test 7: multi-unit syntax validation must use `hcl validate --all` when the
+# root directory has no terragrunt.hcl.
+TMP_DIR="$(mktemp -d)"
+setup_multi_requires_all_for_hcl_validate "$TMP_DIR"
+if ! PATH="$TMP_DIR/bin:$PATH" SKIP_PLAN=true SKIP_SECURITY=true SKIP_LINT=true SKIP_INPUT_VALIDATION=true \
+     bash "$VALIDATOR" "$TMP_DIR/infra" >/dev/null 2>&1; then
+  echo "FAIL: expected success when multi-unit syntax validation uses --all"
+  exit 1
+fi
+cleanup
+
+# Test 8: when `hcl validate --all` is unsupported, validator should fallback
+# to plain `hcl validate`.
+TMP_DIR="$(mktemp -d)"
+setup_multi_unknown_flag_fallback_case "$TMP_DIR"
+if ! PATH="$TMP_DIR/bin:$PATH" SKIP_PLAN=true SKIP_SECURITY=true SKIP_LINT=true SKIP_INPUT_VALIDATION=true \
+     bash "$VALIDATOR" "$TMP_DIR/infra" >/dev/null 2>&1; then
+  echo "FAIL: expected success when --all fallback path is available"
+  exit 1
+fi
+if ! grep -q "^hcl validate --all$" "$TMP_DIR/terragrunt.calls"; then
+  echo "FAIL: expected hcl validate --all to be attempted in multi mode"
+  exit 1
+fi
+if ! grep -q "^hcl validate$" "$TMP_DIR/terragrunt.calls"; then
+  echo "FAIL: expected fallback to plain hcl validate when --all is unsupported"
+  exit 1
+fi
+cleanup
+
+# Test 9: root-only mode should not fail Terragrunt syntax validation.
+TMP_DIR="$(mktemp -d)"
+setup_root_only_case "$TMP_DIR"
+if ! PATH="$TMP_DIR/bin:$PATH" SKIP_PLAN=true SKIP_SECURITY=true SKIP_LINT=true SKIP_INPUT_VALIDATION=true \
+     bash "$VALIDATOR" "$TMP_DIR/root-only" >/dev/null 2>&1; then
+  echo "FAIL: expected root-only mode to skip syntax/terraform checks without failing"
   exit 1
 fi
 cleanup

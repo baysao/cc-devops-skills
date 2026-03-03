@@ -391,12 +391,17 @@ approx_topk(10,
   sum by (endpoint) (rate({app="api"}[5m]))
 )
 
-# Percentage per status code of total traffic
-# NOTE: LogQL does NOT support on()/group_left() vector matching (that is PromQL only).
-# Align label sets via aggregation so both sides reduce to the same dimensions.
+# Percentage per status code of total traffic (many-to-one matching against total)
+# LogQL supports vector matching modifiers for arithmetic/comparison:
+# on(...), ignoring(...), group_left, and group_right.
 sum by (status_code) (rate({app="api"} | json [5m]))
-/
-sum (rate({app="api"}[5m]))
+/ on() group_left
+sum(rate({app="api"}[5m]))
+
+# Percentage per status code within each app (many-to-one matching)
+sum by (app, status_code) (rate({job="http-server"} | json [5m]))
+/ on(app) group_left
+sum by (app) (rate({job="http-server"} | json [5m]))
 
 ## === STRUCTURED METADATA (Loki 3.x) ===
 

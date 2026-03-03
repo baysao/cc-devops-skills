@@ -66,12 +66,16 @@ run_ansible_inventory() {
     fi
 }
 
-run_yamllint() {
-    if [ -n "$TEMP_VENV" ]; then
-        "$TEMP_VENV/bin/yamllint" "$@"
-    elif command -v yamllint >/dev/null 2>&1; then
-        yamllint "$@"
+resolve_yamllint_bin() {
+    if [ -n "$TEMP_VENV" ] && [ -x "$TEMP_VENV/bin/yamllint" ]; then
+        echo "$TEMP_VENV/bin/yamllint"
+        return 0
     fi
+    if command -v yamllint >/dev/null 2>&1; then
+        command -v yamllint
+        return 0
+    fi
+    return 1
 }
 
 MISSING_TOOLS=()
@@ -93,11 +97,11 @@ if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
     }
     trap cleanup EXIT INT TERM
 
-    echo "Installing ansible (this may take a minute)..."
+    echo "Installing ansible + yamllint (this may take a minute)..."
     python3 -m venv "$TEMP_VENV" >/dev/null 2>&1
     source "$TEMP_VENV/bin/activate"
     pip install --quiet --upgrade pip setuptools wheel
-    pip install --quiet ansible
+    pip install --quiet ansible yamllint
     echo -e "${COLOR_GREEN}✓ Temporary environment ready${COLOR_RESET}"
     echo ""
 else
@@ -113,12 +117,14 @@ WARNINGS=0
 echo -e "${COLOR_BLUE}[1/4] YAML Syntax Check${COLOR_RESET}"
 echo "-----------------------------------"
 
-YAMLLINT_CONFIG=""
+YAMLLINT_ARGS=()
 if [ -f "$SKILL_DIR/assets/.yamllint" ]; then
-    YAMLLINT_CONFIG="-c $SKILL_DIR/assets/.yamllint"
+    YAMLLINT_ARGS=(-c "$SKILL_DIR/assets/.yamllint")
 fi
 
-if command -v yamllint >/dev/null 2>&1 || [ -n "$TEMP_VENV" ]; then
+YAMLLINT_BIN="$(resolve_yamllint_bin || true)"
+
+if [ -n "$YAMLLINT_BIN" ]; then
     # Collect YAML files to lint (skip non-inventory files)
     if [ "$SCAN_TYPE" = "file" ]; then
         YAML_FILES=("$INVENTORY_ABS")
@@ -128,15 +134,20 @@ if command -v yamllint >/dev/null 2>&1 || [ -n "$TEMP_VENV" ]; then
 
     YAMLLINT_FAILED=0
     for yf in "${YAML_FILES[@]}"; do
-        # shellcheck disable=SC2086
-        OUTPUT=$(run_yamllint $YAMLLINT_CONFIG "$yf" 2>&1 || true)
+        if OUTPUT=$("$YAMLLINT_BIN" "${YAMLLINT_ARGS[@]}" "$yf" 2>&1); then
+            if [ -n "$OUTPUT" ]; then
+                echo "$OUTPUT"
+            fi
+            continue
+        fi
+
         if echo "$OUTPUT" | grep -q "error"; then
             echo -e "${COLOR_RED}✗ YAML errors in: $yf${COLOR_RESET}"
-            echo "$OUTPUT" | grep "error"
+            [ -n "$OUTPUT" ] && echo "$OUTPUT"
             YAMLLINT_FAILED=1
-        elif [ -n "$OUTPUT" ]; then
-            # Warnings only — show but don't fail
-            echo "$OUTPUT"
+        else
+            # warnings only
+            [ -n "$OUTPUT" ] && echo "$OUTPUT"
         fi
     done
 
@@ -147,7 +158,7 @@ if command -v yamllint >/dev/null 2>&1 || [ -n "$TEMP_VENV" ]; then
         echo -e "${COLOR_GREEN}✓ YAML syntax check passed${COLOR_RESET}"
     fi
 else
-    echo -e "${COLOR_YELLOW}⚠ yamllint not available — skipping YAML syntax check${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}⚠ YAML syntax check SKIPPED (yamllint unavailable)${COLOR_RESET}"
     WARNINGS=$((WARNINGS + 1))
 fi
 echo ""
@@ -157,7 +168,9 @@ echo ""
 echo -e "${COLOR_BLUE}[2/4] Inventory Parse (ansible-inventory --list)${COLOR_RESET}"
 echo "-----------------------------------"
 
+LIST_STAGE_OK=0
 if LIST_OUTPUT=$(run_ansible_inventory -i "$INVENTORY_ABS" --list 2>&1); then
+    LIST_STAGE_OK=1
     HOST_COUNT=$(echo "$LIST_OUTPUT" | python3 -c "
 import json, sys
 try:
@@ -236,17 +249,39 @@ if [ "${PASSWORD_HITS:-0}" -gt 0 ]; then
     STRUCT_WARNINGS=$((STRUCT_WARNINGS + 1))
 fi
 
-# Warn if 'localhost' is in the inventory without connection=local
-LOCALHOST_HITS=0
-if [ "$SCAN_TYPE" = "file" ]; then
-    LOCALHOST_HITS=$(grep -c "^localhost" "$INVENTORY_ABS" 2>/dev/null || true)
-else
-    LOCALHOST_HITS=$(grep -r -c "^localhost" "$INVENTORY_ABS" 2>/dev/null | awk -F: '{sum+=$2} END{print sum}' || true)
-fi
+# Warn if 'localhost' is in the parsed inventory without connection=local.
+if [ $LIST_STAGE_OK -eq 1 ]; then
+    LOCALHOST_STATUS=$(printf '%s' "$LIST_OUTPUT" | python3 -c '
+import json
+import sys
 
-if [ "${LOCALHOST_HITS:-0}" -gt 0 ]; then
-    if ! grep -r "ansible_connection.*local" "$INVENTORY_ABS" >/dev/null 2>&1; then
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("parse_error")
+    raise SystemExit(0)
+
+hosts = set((data.get("_meta") or {}).get("hostvars", {}).keys())
+for value in data.values():
+    if isinstance(value, dict):
+        for host in (value.get("hosts") or []):
+            if isinstance(host, str):
+                hosts.add(host)
+
+if "localhost" not in hosts:
+    print("absent")
+    raise SystemExit(0)
+
+hostvars = (data.get("_meta") or {}).get("hostvars", {}) or {}
+localhost_vars = hostvars.get("localhost", {}) or {}
+connection = localhost_vars.get("ansible_connection", "")
+print("ok" if connection == "local" else "warn")
+')
+    if [ "$LOCALHOST_STATUS" = "warn" ]; then
         echo -e "  ${COLOR_YELLOW}⚠${COLOR_RESET} 'localhost' defined without ansible_connection=local"
+        STRUCT_WARNINGS=$((STRUCT_WARNINGS + 1))
+    elif [ "$LOCALHOST_STATUS" = "parse_error" ]; then
+        echo -e "  ${COLOR_YELLOW}⚠${COLOR_RESET} Unable to evaluate localhost connection from inventory JSON"
         STRUCT_WARNINGS=$((STRUCT_WARNINGS + 1))
     fi
 fi

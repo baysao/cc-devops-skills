@@ -29,3 +29,7 @@ coverage/
 # Build artifacts (if any)
 build/
 dist/
+
+# Python bytecode/cache
+__pycache__/
+*.pyc

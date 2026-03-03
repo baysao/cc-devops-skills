@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 # Make sure the script directory is importable
@@ -94,6 +95,57 @@ class TestAllUseCasesGenerate(unittest.TestCase):
     def test_unknown_use_case_raises(self):
         with self.assertRaises(ValueError):
             self.gen.generate("nonexistent-use-case")
+
+
+class TestKwargCompatibilityAndValidation(unittest.TestCase):
+    """Deprecated aliases should map correctly and unknown kwargs must fail fast."""
+
+    def setUp(self):
+        self.gen = FluentBitConfigGenerator()
+
+    def test_syslog_legacy_aliases_are_mapped_with_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            config = self.gen.generate(
+                "syslog-forward",
+                forward_host="legacy-syslog.internal",
+                forward_port=1514,
+            )
+
+        self.assertIn("Host          legacy-syslog.internal", config)
+        self.assertIn("Port          1514", config)
+
+        messages = [str(item.message) for item in caught]
+        self.assertTrue(any("forward_host" in msg and "syslog_host" in msg for msg in messages))
+        self.assertTrue(any("forward_port" in msg and "syslog_port" in msg for msg in messages))
+
+    def test_file_path_alias_is_mapped_with_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            config = self.gen.generate("file-tail-s3", file_path="/tmp/legacy.log")
+
+        self.assertIn("Path              /tmp/legacy.log", config)
+        self.assertTrue(any("file_path" in str(item.message) for item in caught))
+
+    def test_new_kwarg_wins_when_old_and_new_are_both_passed(self):
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always", DeprecationWarning)
+            config = self.gen.generate(
+                "syslog-forward",
+                syslog_host="preferred.example.com",
+                forward_host="legacy.example.com",
+            )
+
+        self.assertIn("Host          preferred.example.com", config)
+        self.assertNotIn("Host          legacy.example.com", config)
+
+    def test_unknown_kwarg_is_rejected_for_syslog_forward(self):
+        with self.assertRaisesRegex(ValueError, "Unknown parameter\\(s\\).*unexpected_flag"):
+            self.gen.generate("syslog-forward", unexpected_flag=True)
+
+    def test_unknown_kwarg_is_rejected_for_file_tail_s3(self):
+        with self.assertRaisesRegex(ValueError, "Unknown parameter\\(s\\).*extra_option"):
+            self.gen.generate("file-tail-s3", extra_option="x")
 
 
 class TestOtlpEndpointParsing(unittest.TestCase):
@@ -362,6 +414,37 @@ class TestCLI(unittest.TestCase):
             self._run("--use-case", "prometheus-metrics", "--output", tmp.name)
             content = Path(tmp.name).read_text()
         self.assertNotIn("[FILTER]", content)
+
+    def test_syslog_forward_legacy_aliases_cli(self):
+        with tempfile.NamedTemporaryFile(suffix=".conf", delete=False) as tmp:
+            self._run(
+                "--use-case", "syslog-forward",
+                "--forward-host", "legacy-syslog.internal",
+                "--forward-port", "1514",
+                "--output", tmp.name,
+            )
+            content = Path(tmp.name).read_text()
+        self.assertIn("Host          legacy-syslog.internal", content)
+        self.assertIn("Port          1514", content)
+
+    def test_file_tail_s3_legacy_file_path_cli(self):
+        with tempfile.NamedTemporaryFile(suffix=".conf", delete=False) as tmp:
+            self._run(
+                "--use-case", "file-tail-s3",
+                "--file-path", "/tmp/legacy.log",
+                "--output", tmp.name,
+            )
+            content = Path(tmp.name).read_text()
+        self.assertIn("Path              /tmp/legacy.log", content)
+
+    def test_unsupported_parameter_for_use_case_exits_nonzero(self):
+        result = self._run(
+            "--use-case", "syslog-forward",
+            "--es-host", "elasticsearch.local",
+            expect_success=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unsupported parameter(s) for use case 'syslog-forward'", result.stderr)
 
     def test_unknown_use_case_exits_nonzero(self):
         result = self._run("--use-case", "nonexistent", expect_success=False)

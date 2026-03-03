@@ -7,9 +7,14 @@ This directory contains test materials for validating the ansible-validator skil
 ```
 test/
 ├── README.md              # This file
+├── test_regressions.sh     # Regression tests for validator scripts
+├── inventory/              # Inventory fixtures for validation tests
+│   └── localhost-nested.yml
 ├── playbooks/             # Example playbooks for testing
 │   ├── good-playbook.yml  # Well-written playbook
-│   └── bad-playbook.yml   # Playbook with issues
+│   ├── bad-playbook.yml   # Playbook with issues
+│   ├── regression-inline-fqcn.yml
+│   └── regression-mixed-import.yml
 └── roles/                 # Test roles
     └── geerlingguy.mysql/ # Production-quality MySQL role
 ```
@@ -84,6 +89,13 @@ bash ../scripts/extract_ansible_info_wrapper.sh playbooks/bad-playbook.yml
 yamllint -c ../assets/.yamllint playbooks/good-playbook.yml
 ansible-playbook --syntax-check playbooks/good-playbook.yml  # if ansible installed
 ansible-lint -c ../assets/.ansible-lint playbooks/good-playbook.yml  # if ansible-lint installed
+```
+
+### Script Regression Testing
+
+```bash
+# Run targeted regressions for ansible-validator scripts
+bash test_regressions.sh
 ```
 
 ### Role Testing

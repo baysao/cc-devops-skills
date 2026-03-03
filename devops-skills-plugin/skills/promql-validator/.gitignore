@@ -29,3 +29,7 @@ coverage/
 # Build artifacts (if any)
 build/
 dist/
+
+# Python bytecode/cache artifacts for local script execution
+scripts/__pycache__/
+scripts/*.py[cod]

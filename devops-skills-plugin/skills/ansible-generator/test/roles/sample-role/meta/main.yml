@@ -3,7 +3,8 @@
 # Metadata
 
 galaxy_info:
-  role_name: sample-role
+  role_name: sample_role
+  standalone: true
   author: Your Name
   description: Sample role demonstrating correct ansible-generator output patterns
   license: MIT
@@ -21,8 +22,7 @@ galaxy_info:
         - bookworm # 12
     - name: EL
       versions:
-        - 8
-        - 9
+        - all
 
   galaxy_tags:
     - sample

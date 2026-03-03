@@ -217,11 +217,13 @@ count(node_cpu_seconds_total{mode="idle"})
 
 ## ===== TIME-BASED =====
 
-# Only during business hours (9 AM - 5 PM)
-http_requests_total * scalar((hour() >= bool 9) * (hour() < bool 17))
+# Note: hour() and day_of_week() evaluate in UTC.
 
-# Only on weekdays
-http_requests_total * scalar((day_of_week() >= bool 1) * (day_of_week() <= bool 5))
+# Only during business hours (9 AM - 5 PM UTC)
+http_requests_total and on() (hour() >= 9 and hour() < 17)
 
-# Weekend traffic
-http_requests_total * scalar((day_of_week() == bool 0) + (day_of_week() == bool 6))
+# Only on weekdays (Monday-Friday UTC)
+http_requests_total and on() (day_of_week() >= 1 and day_of_week() <= 5)
+
+# Weekend traffic (Saturday-Sunday UTC)
+http_requests_total and on() (day_of_week() == 0 or day_of_week() == 6)

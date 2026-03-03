@@ -112,9 +112,85 @@ validate_image_tag() {
 # Function to validate image digest format
 validate_image_digest() {
     local digest="$1"
+    local algorithm
+    local hash_value
+    local algorithm_lower
+
     if [[ "$digest" =~ [[:space:]] ]] || [[ "$digest" != *:* ]]; then
-        error_exit "Invalid image digest '${digest}'. Use format <algorithm>:<hash> (e.g., sha256:...)"
+        error_exit "Invalid image digest '${digest}'. Use format <algorithm>:<hash> (e.g., sha256:<64 hex>)"
     fi
+
+    algorithm="${digest%%:*}"
+    hash_value="${digest#*:}"
+
+    if [ -z "$algorithm" ] || [ -z "$hash_value" ]; then
+        error_exit "Invalid image digest '${digest}'. Algorithm and hash must both be non-empty"
+    fi
+
+    algorithm_lower="$(printf '%s' "$algorithm" | tr '[:upper:]' '[:lower:]')"
+
+    case "$algorithm_lower" in
+        sha256)
+            if [[ ! "$hash_value" =~ ^[a-fA-F0-9]{64}$ ]]; then
+                error_exit "Invalid image digest '${digest}'. sha256 digests must be 64 hexadecimal characters"
+            fi
+            ;;
+        sha512)
+            if [[ ! "$hash_value" =~ ^[a-fA-F0-9]{128}$ ]]; then
+                error_exit "Invalid image digest '${digest}'. sha512 digests must be 128 hexadecimal characters"
+            fi
+            ;;
+        *)
+            error_exit "Invalid image digest '${digest}'. Supported algorithms: sha256 or sha512"
+            ;;
+    esac
+}
+
+# Return success when a repository reference appears to include a tag in its last segment.
+repository_has_inline_tag() {
+    local repository="$1"
+    local last_segment
+
+    last_segment="${repository##*/}"
+    [[ "$last_segment" == *":"* ]]
+}
+
+# Normalize image digest algorithm to lowercase for consistent output in values.yaml.
+normalize_image_digest() {
+    local digest="$1"
+    local algorithm
+    local hash_value
+
+    algorithm="${digest%%:*}"
+    hash_value="${digest#*:}"
+    algorithm="$(printf '%s' "$algorithm" | tr '[:upper:]' '[:lower:]')"
+
+    printf '%s:%s' "$algorithm" "$hash_value"
+}
+
+# Return success when the provided image reference includes both a tag and a digest.
+image_ref_has_tag_and_digest() {
+    local image_ref="$1"
+    local repository_part
+
+    repository_part="${image_ref%@*}"
+    repository_has_inline_tag "$repository_part"
+}
+
+# Function to validate image digest reference rules
+validate_digest_reference() {
+    local image_ref="$1"
+    local digest="$2"
+
+    if image_ref_has_tag_and_digest "$image_ref"; then
+        error_exit "Image reference '${image_ref}' cannot include both tag and digest. Use either <repository>:<tag> or <repository>@<digest>"
+    fi
+
+    if [ "$TAG_EXPLICIT" = true ] || [ -n "$IMAGE_TAG" ]; then
+        error_exit "Do not combine --tag with digest image references. Remove --tag or provide an image without '@'"
+    fi
+
+    validate_image_digest "$digest"
 }
 
 # Function to validate workload type
@@ -152,11 +228,8 @@ parse_image_reference() {
             error_exit "Invalid digest image reference '${image_ref}'. Use format <repository>@<algorithm>:<hash>"
         fi
 
-        if [ "$TAG_EXPLICIT" = true ] || [ -n "$IMAGE_TAG" ]; then
-            error_exit "Do not combine --tag with digest image references. Remove --tag or provide an image without '@'"
-        fi
-
-        validate_image_digest "$IMAGE_DIGEST"
+        validate_digest_reference "$image_ref" "$IMAGE_DIGEST"
+        IMAGE_DIGEST="$(normalize_image_digest "$IMAGE_DIGEST")"
         return 0
     fi
 

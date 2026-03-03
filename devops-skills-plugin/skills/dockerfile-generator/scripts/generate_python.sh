@@ -7,7 +7,10 @@ set -euo pipefail
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 PORT="${PORT:-8000}"
 OUTPUT_FILE="${OUTPUT_FILE:-Dockerfile}"
-APP_ENTRY="${APP_ENTRY:-app.py}"
+LEGACY_ENTRY="${APP_ENTRY:-app.py}"
+LEGACY_ENTRY_SET="false"
+ENTRY_CMD="${ENTRY_CMD:-}"
+ENTRY_ARGS=()
 
 # Usage
 usage() {
@@ -20,7 +23,9 @@ OPTIONS:
     -v, --version VERSION     Python version (default: 3.12)
     -p, --port PORT          Port to expose (default: 8000)
     -o, --output FILE        Output file (default: Dockerfile)
-    -e, --entry COMMAND      Application entry point or full start command (default: app.py)
+    -e, --entry COMMAND      Legacy entry syntax (simple whitespace split only)
+        --entry-cmd COMMAND  Preferred command binary/executable
+        --entry-arg ARG      Preferred command argument (repeatable; preserves spaces)
     -h, --help               Show this help message
 
 EXAMPLES:
@@ -32,6 +37,9 @@ EXAMPLES:
 
     # Django app
     $0 --port 8080 --entry "python manage.py runserver 0.0.0.0:8080"
+
+    # Preferred structured entrypoint (preserves quoted args exactly)
+    $0 --entry-cmd python --entry-arg -m --entry-arg uvicorn --entry-arg main:app --entry-arg --log-config --entry-arg "configs/logging prod.yaml"
 
 EOF
     exit 0
@@ -53,7 +61,16 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -e|--entry)
-            APP_ENTRY="$2"
+            LEGACY_ENTRY="$2"
+            LEGACY_ENTRY_SET="true"
+            shift 2
+            ;;
+        --entry-cmd)
+            ENTRY_CMD="$2"
+            shift 2
+            ;;
+        --entry-arg)
+            ENTRY_ARGS+=("$2")
             shift 2
             ;;
         -h|--help)
@@ -83,26 +100,48 @@ escape_sed_replacement() {
     printf '%s' "$input"
 }
 
-# Build CMD instruction.
-# - Single token (no space): treat as a Python script file, prepend interpreter.
-# - Multi-token (has space): tokenize into a proper exec-form JSON array so that
-#   every word becomes its own element. This avoids sh -c wrapping, which adds
-#   an extra process and breaks PID-1 signal handling.
-#   Examples:
-#     "app.py"                                -> CMD ["python", "app.py"]
-#     "python app.py"                         -> CMD ["python", "app.py"]
-#     "uvicorn main:app --host 0.0.0.0 --port 8000"
-#                                             -> CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-if [[ "$APP_ENTRY" =~ [[:space:]] ]]; then
-    read -ra _entry_tokens <<< "$APP_ENTRY"
-    _json_parts=()
-    for _token in "${_entry_tokens[@]}"; do
-        _json_parts+=("\"$(escape_json_string "$_token")\"")
-    done
-    CMD_INSTRUCTION="CMD [$(IFS=', '; echo "${_json_parts[*]}")]"
-else
-    CMD_INSTRUCTION="CMD [\"python\", \"$(escape_json_string "$APP_ENTRY")\"]"
+# Validate mutually exclusive entrypoint interfaces.
+if [[ -n "$ENTRY_CMD" && "$LEGACY_ENTRY_SET" == "true" ]]; then
+    echo "ERROR: use either --entry or --entry-cmd/--entry-arg, not both." >&2
+    exit 1
 fi
+
+if [[ -z "$ENTRY_CMD" && ${#ENTRY_ARGS[@]} -gt 0 ]]; then
+    echo "ERROR: --entry-arg requires --entry-cmd." >&2
+    exit 1
+fi
+
+# Build CMD instruction.
+# Preferred mode:
+#   --entry-cmd <cmd> --entry-arg <arg> --entry-arg <arg>
+# Legacy mode:
+#   --entry "<simple whitespace-delimited command>"
+# Quoted legacy entries are rejected because they cannot be parsed safely.
+if [[ -n "$ENTRY_CMD" ]]; then
+    CMD_PARTS=("$ENTRY_CMD" "${ENTRY_ARGS[@]}")
+else
+    if [[ "$LEGACY_ENTRY" == *"\""* || "$LEGACY_ENTRY" == *"'"* ]]; then
+        echo "ERROR: quoted --entry values are not supported. Use --entry-cmd/--entry-arg." >&2
+        exit 1
+    fi
+
+    if [[ "$LEGACY_ENTRY" =~ [[:space:]] ]]; then
+        read -r -a CMD_PARTS <<< "$LEGACY_ENTRY"
+    else
+        CMD_PARTS=("python" "$LEGACY_ENTRY")
+    fi
+fi
+
+if [[ -z "${CMD_PARTS[0]:-}" ]]; then
+    echo "ERROR: entry command cannot be empty." >&2
+    exit 1
+fi
+
+_json_parts=()
+for _token in "${CMD_PARTS[@]}"; do
+    _json_parts+=("\"$(escape_json_string "$_token")\"")
+done
+CMD_INSTRUCTION="CMD [$(IFS=', '; echo "${_json_parts[*]}")]"
 CMD_INSTRUCTION_SED="$(escape_sed_replacement "$CMD_INSTRUCTION")"
 
 # Generate Dockerfile
@@ -168,4 +207,12 @@ rm -f "${OUTPUT_FILE}.bak"
 echo "✓ Generated Python Dockerfile: $OUTPUT_FILE"
 echo "  Python version: $PYTHON_VERSION"
 echo "  Port: $PORT"
-echo "  Entry point: $APP_ENTRY"
+if [[ -n "$ENTRY_CMD" ]]; then
+    ENTRY_DISPLAY="$ENTRY_CMD"
+    for _arg in "${ENTRY_ARGS[@]}"; do
+        ENTRY_DISPLAY+=" $(printf '%q' "$_arg")"
+    done
+else
+    ENTRY_DISPLAY="$LEGACY_ENTRY"
+fi
+echo "  Entry point: $ENTRY_DISPLAY"

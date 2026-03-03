@@ -14,9 +14,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
+from yaml.constructor import ConstructorError
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -27,6 +29,63 @@ GENERATOR = SCRIPT_DIR / "generate_config.py"
 
 ALL_MODES = ["monolithic", "simple-scalable", "microservices"]
 ALL_STORAGES = ["filesystem", "s3", "gcs", "azure"]
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_mapping_without_duplicates(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key ({key})",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping_without_duplicates,
+)
+
+
+def load_yaml_strict(content: str):
+    """Parse YAML and fail on duplicate keys."""
+    return yaml.load(content, Loader=UniqueKeyLoader)
+
+
+@contextlib.contextmanager
+def temporary_output_path(filename: str = "loki-config.yaml"):
+    """Yield a temp output path that is always cleaned up."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        yield Path(temp_dir) / filename
+
+
+class TestStrictYamlLoader(unittest.TestCase):
+    """Strict loader should fail on duplicate keys."""
+
+    def test_duplicate_keys_raise_constructor_error(self):
+        with self.assertRaises(ConstructorError):
+            load_yaml_strict("key: value\nkey: other\n")
+
+
+class TestTempOutputPathHelper(unittest.TestCase):
+    """Temporary output helper should clean up its directory."""
+
+    def test_temp_directory_is_removed_after_context(self):
+        with temporary_output_path("cleanup.yaml") as path:
+            temp_dir = path.parent
+            path.write_text("sample")
+            self.assertTrue(path.exists())
+
+        self.assertFalse(temp_dir.exists())
 
 
 class TestAllCombinationsGenerate(unittest.TestCase):
@@ -42,7 +101,7 @@ class TestAllCombinationsGenerate(unittest.TestCase):
                     config = self.gen.generate(mode, storage)
                     self.assertIsInstance(config, str)
                     self.assertGreater(len(config.strip()), 0)
-                    doc = yaml.safe_load(config)
+                    doc = load_yaml_strict(config)
                     self.assertIsNotNone(doc, f"{mode}+{storage} returned empty YAML doc")
 
     def test_unknown_mode_raises_value_error(self):
@@ -61,7 +120,7 @@ class TestSchemaConfig(unittest.TestCase):
         self.gen = LokiConfigGenerator()
 
     def _schema_entry(self, config: str) -> dict:
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         return doc["schema_config"]["configs"][0]
 
     def test_all_combos_use_tsdb_v13(self):
@@ -82,6 +141,39 @@ class TestSchemaConfig(unittest.TestCase):
                 entry = self._schema_entry(config)
                 self.assertEqual(entry["object_store"], expected)
 
+    def test_schema_transition_periods_are_rendered_when_future_dated(self):
+        transition_1 = (date.today() + timedelta(days=1)).isoformat()
+        transition_2 = (date.today() + timedelta(days=30)).isoformat()
+        config = self.gen.generate(
+            "simple-scalable",
+            "s3",
+            schema_transition_dates=[transition_1, transition_2],
+        )
+        doc = load_yaml_strict(config)
+        periods = doc["schema_config"]["configs"]
+        self.assertEqual(len(periods), 3)
+        self.assertEqual(str(periods[1]["from"]), transition_1)
+        self.assertEqual(str(periods[2]["from"]), transition_2)
+
+    def test_schema_transition_periods_must_be_future_dated(self):
+        non_future_transition = date.today().isoformat()
+        with self.assertRaisesRegex(ValueError, "future-dated"):
+            self.gen.generate(
+                "simple-scalable",
+                "s3",
+                schema_transition_dates=[non_future_transition],
+            )
+
+    def test_schema_transition_periods_must_be_strictly_increasing(self):
+        later_transition = (date.today() + timedelta(days=20)).isoformat()
+        earlier_transition = (date.today() + timedelta(days=10)).isoformat()
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            self.gen.generate(
+                "simple-scalable",
+                "s3",
+                schema_transition_dates=[later_transition, earlier_transition],
+            )
+
 
 class TestAuthDefaults(unittest.TestCase):
     """auth_enabled defaults differ by deployment mode."""
@@ -90,23 +182,23 @@ class TestAuthDefaults(unittest.TestCase):
         self.gen = LokiConfigGenerator()
 
     def test_monolithic_defaults_auth_disabled(self):
-        doc = yaml.safe_load(self.gen.generate("monolithic", "filesystem"))
+        doc = load_yaml_strict(self.gen.generate("monolithic", "filesystem"))
         self.assertFalse(doc["auth_enabled"])
 
     def test_simple_scalable_defaults_auth_enabled(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3"))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3"))
         self.assertTrue(doc["auth_enabled"])
 
     def test_microservices_defaults_auth_enabled(self):
-        doc = yaml.safe_load(self.gen.generate("microservices", "s3"))
+        doc = load_yaml_strict(self.gen.generate("microservices", "s3"))
         self.assertTrue(doc["auth_enabled"])
 
     def test_auth_enabled_can_be_overridden(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3", auth_enabled=False))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3", auth_enabled=False))
         self.assertFalse(doc["auth_enabled"])
 
     def test_auth_disabled_can_be_overridden_for_monolithic(self):
-        doc = yaml.safe_load(self.gen.generate("monolithic", "filesystem", auth_enabled=True))
+        doc = load_yaml_strict(self.gen.generate("monolithic", "filesystem", auth_enabled=True))
         self.assertTrue(doc["auth_enabled"])
 
 
@@ -117,12 +209,12 @@ class TestFilesystemStorageMonolithic(unittest.TestCase):
         self.gen = LokiConfigGenerator()
 
     def test_uses_inmemory_ring(self):
-        doc = yaml.safe_load(self.gen.generate("monolithic", "filesystem"))
+        doc = load_yaml_strict(self.gen.generate("monolithic", "filesystem"))
         ring_store = doc["common"]["ring"]["kvstore"]["store"]
         self.assertEqual(ring_store, "inmemory")
 
     def test_replication_factor_is_1(self):
-        doc = yaml.safe_load(self.gen.generate("monolithic", "filesystem"))
+        doc = load_yaml_strict(self.gen.generate("monolithic", "filesystem"))
         self.assertEqual(doc["common"]["replication_factor"], 1)
 
     def test_no_memberlist_block(self):
@@ -137,17 +229,17 @@ class TestMemberlistRing(unittest.TestCase):
         self.gen = LokiConfigGenerator()
 
     def test_simple_scalable_uses_memberlist(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3"))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3"))
         ring_store = doc["common"]["ring"]["kvstore"]["store"]
         self.assertEqual(ring_store, "memberlist")
 
     def test_memberlist_join_members_present(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3"))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3"))
         self.assertIn("memberlist", doc)
         self.assertIn("join_members", doc["memberlist"])
 
     def test_microservices_uses_consul(self):
-        doc = yaml.safe_load(self.gen.generate("microservices", "s3"))
+        doc = load_yaml_strict(self.gen.generate("microservices", "s3"))
         ring_store = doc["common"]["ring"]["kvstore"]["store"]
         self.assertEqual(ring_store, "consul")
 
@@ -165,15 +257,15 @@ class TestLimitsConfig(unittest.TestCase):
     def test_limits_config_present(self):
         for mode in ALL_MODES:
             with self.subTest(mode=mode):
-                doc = yaml.safe_load(self.gen.generate(mode, "s3"))
+                doc = load_yaml_strict(self.gen.generate(mode, "s3"))
                 self.assertIn("limits_config", doc)
 
     def test_custom_retention_days(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3", retention_days=60))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3", retention_days=60))
         self.assertEqual(doc["limits_config"]["retention_period"], "60d")
 
     def test_ingestion_burst_is_double_rate(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3", ingestion_rate_mb=20))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3", ingestion_rate_mb=20))
         lc = doc["limits_config"]
         self.assertEqual(lc["ingestion_rate_mb"], 20)
         self.assertEqual(lc["ingestion_burst_size_mb"], 40)
@@ -181,13 +273,13 @@ class TestLimitsConfig(unittest.TestCase):
     def test_structured_metadata_always_allowed(self):
         for mode in ALL_MODES:
             with self.subTest(mode=mode):
-                doc = yaml.safe_load(self.gen.generate(mode, "s3"))
+                doc = load_yaml_strict(self.gen.generate(mode, "s3"))
                 self.assertTrue(doc["limits_config"]["allow_structured_metadata"])
 
     def test_volume_enabled(self):
         for mode in ALL_MODES:
             with self.subTest(mode=mode):
-                doc = yaml.safe_load(self.gen.generate(mode, "s3"))
+                doc = load_yaml_strict(self.gen.generate(mode, "s3"))
                 self.assertTrue(doc["limits_config"]["volume_enabled"])
 
 
@@ -200,7 +292,7 @@ class TestPatternIngester(unittest.TestCase):
     def test_pattern_ingester_enabled_by_default(self):
         for mode in ALL_MODES:
             with self.subTest(mode=mode):
-                doc = yaml.safe_load(self.gen.generate(mode, "s3"))
+                doc = load_yaml_strict(self.gen.generate(mode, "s3"))
                 # Microservices does not emit pattern_ingester block
                 if mode != "microservices":
                     self.assertTrue(doc.get("pattern_ingester", {}).get("enabled", False))
@@ -217,7 +309,7 @@ class TestOtlpConfig(unittest.TestCase):
         self.gen = LokiConfigGenerator()
 
     def _otlp_attrs(self, config: str):
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         otlp = doc.get("limits_config", {}).get("otlp_config", {})
         index_labels, structured_meta = [], []
         for entry in otlp.get("resource_attributes", {}).get("attributes_config", []):
@@ -229,12 +321,12 @@ class TestOtlpConfig(unittest.TestCase):
 
     def test_otlp_not_in_output_by_default(self):
         config = self.gen.generate("simple-scalable", "s3")
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         self.assertNotIn("otlp_config", doc.get("limits_config", {}))
 
     def test_otlp_generated_when_enabled(self):
         config = self.gen.generate("simple-scalable", "s3", otlp_enabled=True)
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         self.assertIn("otlp_config", doc["limits_config"])
 
     def test_high_cardinality_attrs_not_in_index_labels(self):
@@ -251,7 +343,7 @@ class TestOtlpConfig(unittest.TestCase):
 
     def test_otlp_and_time_sharding_both_in_limits(self):
         config = self.gen.generate("simple-scalable", "s3", otlp_enabled=True, time_sharding=True)
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         lc = doc["limits_config"]
         self.assertIn("otlp_config", lc)
         self.assertIn("shard_streams", lc)
@@ -291,11 +383,11 @@ class TestCompactorConfig(unittest.TestCase):
     def test_compactor_present_all_modes(self):
         for mode in ALL_MODES:
             with self.subTest(mode=mode):
-                doc = yaml.safe_load(self.gen.generate(mode, "s3"))
+                doc = load_yaml_strict(self.gen.generate(mode, "s3"))
                 self.assertIn("compactor", doc)
 
     def test_retention_enabled(self):
-        doc = yaml.safe_load(self.gen.generate("simple-scalable", "s3"))
+        doc = load_yaml_strict(self.gen.generate("simple-scalable", "s3"))
         self.assertTrue(doc["compactor"]["retention_enabled"])
 
     def test_delete_request_store_sqlite(self):
@@ -327,21 +419,21 @@ class TestThanosStorage(unittest.TestCase):
 
     def test_thanos_s3_generates_storage_config(self):
         config = self.gen.generate("simple-scalable", "s3", thanos_storage=True, bucket="my-bucket")
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         sc = doc["storage_config"]
         self.assertTrue(sc["use_thanos_objstore"])
         self.assertEqual(sc["object_store"]["s3"]["bucket_name"], "my-bucket")
 
     def test_thanos_gcs_generates_storage_config(self):
         config = self.gen.generate("simple-scalable", "gcs", thanos_storage=True, bucket="my-gcs-bucket")
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         sc = doc["storage_config"]
         self.assertTrue(sc["use_thanos_objstore"])
         self.assertEqual(sc["object_store"]["gcs"]["bucket_name"], "my-gcs-bucket")
 
     def test_thanos_azure_generates_storage_config(self):
         config = self.gen.generate("simple-scalable", "azure", thanos_storage=True, container="my-container")
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         sc = doc["storage_config"]
         self.assertTrue(sc["use_thanos_objstore"])
         self.assertEqual(sc["object_store"]["azure"]["container_name"], "my-container")
@@ -361,7 +453,7 @@ class TestThanosStorage(unittest.TestCase):
 
     def test_thanos_with_microservices(self):
         config = self.gen.generate("microservices", "s3", thanos_storage=True, bucket="ms-bucket")
-        doc = yaml.safe_load(config)
+        doc = load_yaml_strict(config)
         self.assertTrue(doc["storage_config"]["use_thanos_objstore"])
 
 
@@ -392,15 +484,15 @@ class TestLimitsDryRun(unittest.TestCase):
         self.assertNotIn("ingest_limits_dry_run_enabled", config)
 
     def test_cli_simple_scalable_dry_run_is_applied(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("simple-scalable-dry-run.yaml") as output_path:
             result = subprocess.run(
                 [sys.executable, str(GENERATOR),
                  "--mode", "simple-scalable", "--storage", "s3", "--limits-dry-run",
-                 "--output", tmp.name],
+                 "--output", str(output_path)],
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0)
-            content = Path(tmp.name).read_text()
+            content = output_path.read_text()
         self.assertIn("ingest_limits_dry_run_enabled: true", content)
         # Only one distributor: block — no double-append
         self.assertEqual(content.count("distributor:"), 1)
@@ -458,15 +550,15 @@ class TestRulerConfig(unittest.TestCase):
         self.assertIn("http://prom:9090/api/v1/write", config)
 
     def test_cli_ruler_simple_scalable(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("ruler-simple-scalable.yaml") as output_path:
             result = subprocess.run(
                 [sys.executable, str(GENERATOR),
                  "--mode", "simple-scalable", "--storage", "s3", "--ruler",
-                 "--output", tmp.name],
+                 "--output", str(output_path)],
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            content = Path(tmp.name).read_text()
+            content = output_path.read_text()
         self.assertIn("ruler:", content)
         # Exactly one ruler: block — no double-append from CLI + generate()
         self.assertEqual(content.count("\nruler:"), 1)
@@ -531,28 +623,28 @@ class TestCLI(unittest.TestCase):
         self.assertIn("--storage", result.stdout)
 
     def test_monolithic_filesystem(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("monolithic-filesystem.yaml") as output_path:
             self._run("--mode", "monolithic", "--storage", "filesystem",
-                      "--no-auth-enabled", "--output", tmp.name)
-            doc = yaml.safe_load(Path(tmp.name).read_text())
+                      "--no-auth-enabled", "--output", str(output_path))
+            doc = load_yaml_strict(output_path.read_text())
         self.assertFalse(doc["auth_enabled"])
         self.assertEqual(doc["schema_config"]["configs"][0]["store"], "tsdb")
 
     def test_simple_scalable_s3(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("simple-scalable-s3.yaml") as output_path:
             self._run("--mode", "simple-scalable", "--storage", "s3",
-                      "--bucket", "test-bucket", "--region", "eu-west-1", "--output", tmp.name)
-            content = Path(tmp.name).read_text()
-            doc = yaml.safe_load(content)
+                      "--bucket", "test-bucket", "--region", "eu-west-1", "--output", str(output_path))
+            content = output_path.read_text()
+            doc = load_yaml_strict(content)
         self.assertTrue(doc["auth_enabled"])
         self.assertIn("test-bucket", content)
         self.assertIn("eu-west-1", content)
 
     def test_microservices_gcs(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("microservices-gcs.yaml") as output_path:
             self._run("--mode", "microservices", "--storage", "gcs",
-                      "--bucket", "loki-gcs", "--output", tmp.name)
-            doc = yaml.safe_load(Path(tmp.name).read_text())
+                      "--bucket", "loki-gcs", "--output", str(output_path))
+            doc = load_yaml_strict(output_path.read_text())
         self.assertIn("query_scheduler", doc)
         self.assertIn("index_gateway", doc)
 
@@ -567,40 +659,58 @@ class TestCLI(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     def test_zone_awareness_flag(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("zone-awareness.yaml") as output_path:
             self._run("--mode", "simple-scalable", "--storage", "s3",
-                      "--zone-awareness", "--output", tmp.name)
-            content = Path(tmp.name).read_text()
+                      "--zone-awareness", "--output", str(output_path))
+            content = output_path.read_text()
         self.assertIn("zone_awareness_enabled: true", content)
         self.assertIn("instance_availability_zone", content)
 
     def test_otlp_enabled_flag(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("otlp-enabled.yaml") as output_path:
             self._run("--mode", "simple-scalable", "--storage", "s3",
-                      "--otlp-enabled", "--output", tmp.name)
-            doc = yaml.safe_load(Path(tmp.name).read_text())
+                      "--otlp-enabled", "--output", str(output_path))
+            doc = load_yaml_strict(output_path.read_text())
         self.assertIn("otlp_config", doc["limits_config"])
 
     def test_thanos_storage_flag(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("thanos-storage.yaml") as output_path:
             self._run("--mode", "simple-scalable", "--storage", "s3",
-                      "--thanos-storage", "--bucket", "thanos-bucket", "--output", tmp.name)
-            doc = yaml.safe_load(Path(tmp.name).read_text())
+                      "--thanos-storage", "--bucket", "thanos-bucket", "--output", str(output_path))
+            doc = load_yaml_strict(output_path.read_text())
         self.assertTrue(doc["storage_config"]["use_thanos_objstore"])
 
     def test_time_sharding_flag(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("time-sharding.yaml") as output_path:
             self._run("--mode", "simple-scalable", "--storage", "s3",
-                      "--time-sharding", "--output", tmp.name)
-            doc = yaml.safe_load(Path(tmp.name).read_text())
+                      "--time-sharding", "--output", str(output_path))
+            doc = load_yaml_strict(output_path.read_text())
         self.assertTrue(doc["limits_config"]["shard_streams"]["time_sharding_enabled"])
 
     def test_horizontal_compactor_main(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+        with temporary_output_path("horizontal-compactor-main.yaml") as output_path:
             self._run("--mode", "simple-scalable", "--storage", "s3",
-                      "--horizontal-compactor", "main", "--output", tmp.name)
-            content = Path(tmp.name).read_text()
+                      "--horizontal-compactor", "main", "--output", str(output_path))
+            content = output_path.read_text()
         self.assertIn("horizontal_scaling_mode: main", content)
+
+    def test_schema_transition_flag_adds_future_period(self):
+        transition = (date.today() + timedelta(days=7)).isoformat()
+        with temporary_output_path("schema-transition.yaml") as output_path:
+            self._run("--mode", "simple-scalable", "--storage", "s3",
+                      "--schema-transition-from", transition, "--output", str(output_path))
+            doc = load_yaml_strict(output_path.read_text())
+        periods = doc["schema_config"]["configs"]
+        self.assertEqual(len(periods), 2)
+        self.assertEqual(str(periods[1]["from"]), transition)
+
+    def test_schema_transition_flag_rejects_non_future_period(self):
+        non_future_transition = date.today().isoformat()
+        result = self._run("--mode", "simple-scalable", "--storage", "s3",
+                           "--schema-transition-from", non_future_transition,
+                           "--output", "/tmp/unused.yaml", expect_success=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("future-dated", result.stderr)
 
     def test_mutually_exclusive_auth_flags(self):
         result = self._run("--mode", "monolithic", "--storage", "filesystem",
@@ -609,11 +719,11 @@ class TestCLI(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     def test_output_file_created(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
-            path = Path(tmp.name)
-        self._run("--mode", "monolithic", "--storage", "filesystem", "--output", str(path))
-        self.assertTrue(path.exists())
-        self.assertGreater(path.stat().st_size, 0)
+        with temporary_output_path("output-created.yaml") as output_path:
+            self.assertFalse(output_path.exists())
+            self._run("--mode", "monolithic", "--storage", "filesystem", "--output", str(output_path))
+            self.assertTrue(output_path.exists())
+            self.assertGreater(output_path.stat().st_size, 0)
 
 
 if __name__ == "__main__":

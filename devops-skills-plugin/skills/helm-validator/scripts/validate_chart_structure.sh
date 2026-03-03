@@ -31,7 +31,50 @@ yaml_is_valid() {
     return 2
 }
 
-get_top_level_yaml_value() {
+PYTHON_YAML_FALLBACK_WARNED=0
+
+get_top_level_yaml_value_python() {
+    local file="$1"
+    local key="$2"
+    python3 - "$file" "$key" <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    raise SystemExit(2)
+
+file_path = sys.argv[1]
+key = sys.argv[2]
+
+try:
+    with open(file_path, "r", encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+except Exception as exc:
+    print(f"failed_to_parse:{exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(doc, dict):
+    print("")
+    raise SystemExit(0)
+
+if key not in doc:
+    print("null")
+    raise SystemExit(0)
+
+value = doc.get(key)
+if value is None:
+    print("null")
+elif isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, (int, float, str)):
+    print(value)
+else:
+    print("")
+PY
+}
+
+get_top_level_yaml_value_awk_fallback() {
     local file="$1"
     local key="$2"
     awk -v key="$key" '
@@ -39,11 +82,32 @@ get_top_level_yaml_value() {
         $0 ~ "^" key ":" {
             value=$0
             sub("^" key ":[[:space:]]*", "", value)
+            sub(/[[:space:]]+#.*/, "", value)
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
             print value
             exit
         }
     ' "$file"
+}
+
+get_top_level_yaml_value() {
+    local file="$1"
+    local key="$2"
+    local value=""
+
+    if command -v python3 &> /dev/null; then
+        if value="$(get_top_level_yaml_value_python "$file" "$key" 2>/dev/null)"; then
+            printf "%s" "$value"
+            return 0
+        fi
+
+        if [ "$PYTHON_YAML_FALLBACK_WARNED" -eq 0 ]; then
+            echo "   ⚠️  PyYAML parser unavailable for Chart.yaml field extraction; using basic fallback"
+            PYTHON_YAML_FALLBACK_WARNED=1
+        fi
+    fi
+
+    get_top_level_yaml_value_awk_fallback "$file" "$key"
 }
 
 strip_wrapping_quotes() {

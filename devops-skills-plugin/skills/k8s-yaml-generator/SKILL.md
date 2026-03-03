@@ -1,6 +1,6 @@
 ---
 name: k8s-yaml-generator
-description: Comprehensive toolkit for generating, validating, and managing Kubernetes YAML resources. Use this skill when creating Kubernetes manifests (Deployments, Services, ConfigMaps, StatefulSets, etc.), working with Custom Resource Definitions (CRDs), or generating production-ready K8s configurations.
+description: Generate/create/scaffold Kubernetes YAML — Deployment, Service, ConfigMap, Ingress, RBAC, StatefulSet, CRDs.
 ---
 
 # Kubernetes YAML Generator
@@ -186,7 +186,26 @@ Run direct commands:
 bash devops-skills-plugin/skills/k8s-yaml-validator/scripts/setup_tools.sh
 yamllint -c devops-skills-plugin/skills/k8s-yaml-validator/assets/.yamllint <file.yaml>
 kubeconform -schema-location default -strict -ignore-missing-schemas -summary <file.yaml>
-kubectl apply --dry-run=server -f <file.yaml> || kubectl apply --dry-run=client -f <file.yaml>
+server_out="$(mktemp)"
+client_out="$(mktemp)"
+trap 'rm -f "$server_out" "$client_out"' EXIT
+
+if kubectl apply --dry-run=server -f <file.yaml> >"$server_out" 2>&1; then
+  echo "server_validation=passed"
+elif grep -Eqi "connection refused|no such host|i/o timeout|tls handshake timeout|unable to connect to the server|no configuration has been provided|the server doesn't have a resource type" "$server_out"; then
+  echo "server_validation=skipped"
+  if kubectl apply --dry-run=client -f <file.yaml> >"$client_out" 2>&1; then
+    echo "client_validation=passed"
+  else
+    echo "client_validation=failed"
+    cat "$client_out"
+    exit 1
+  fi
+else
+  echo "server_validation=failed"
+  cat "$server_out"
+  exit 1
+fi
 ```
 
 Contingency B: local tools partially unavailable

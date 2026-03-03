@@ -560,14 +560,16 @@ metric - metric offset 1w
 ### Time-of-Day Analysis
 
 ```promql
-# Only show data during business hours (9 AM - 5 PM)
-metric * scalar((hour() >= bool 9) * (hour() < bool 17))
+# Note: hour() and day_of_week() evaluate in UTC.
 
-# Only show data on weekdays (Monday-Friday)
-metric * scalar((day_of_week() >= bool 1) * (day_of_week() <= bool 5))
+# Only show data during business hours (9 AM - 5 PM UTC)
+metric and on() (hour() >= 9 and hour() < 17)
 
-# Weekend metrics
-metric * scalar((day_of_week() == bool 0) + (day_of_week() == bool 6))
+# Only show data on weekdays (Monday-Friday UTC)
+metric and on() (day_of_week() >= 1 and day_of_week() <= 5)
+
+# Weekend metrics (Saturday-Sunday UTC)
+metric and on() (day_of_week() == 0 or day_of_week() == 6)
 ```
 
 ### Trend Analysis

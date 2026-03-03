@@ -5,6 +5,7 @@
 # Tests:
 #   1. generate_script_template.sh — argument handling and file generation
 #   2. log-analyzer.sh             — functional behaviour
+#   3. run_ci_checks.sh            — deterministic validation wiring
 #
 # Exit 0 when all assertions pass; non-zero on any failure.
 #
@@ -14,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 GENERATOR="$SCRIPT_DIR/generate_script_template.sh"
+CI_RUNNER="$SCRIPT_DIR/run_ci_checks.sh"
 LOG_ANALYZER="$SCRIPT_DIR/../examples/log-analyzer.sh"
 
 PASS=0
@@ -137,6 +139,26 @@ assert_exit_code \
     1 \
     bash "$GENERATOR" standard out.sh extra-arg
 
+assert_exit_code \
+    "traversal template_type payload is rejected" \
+    1 \
+    bash "$GENERATOR" ../templates/standard
+
+assert_output_contains \
+    "traversal payload shows invalid template_type error" \
+    "Invalid TEMPLATE_TYPE" \
+    bash "$GENERATOR" ../templates/standard
+
+assert_exit_code \
+    "slash and dot traversal payload is rejected" \
+    1 \
+    bash "$GENERATOR" standard/../../evil
+
+assert_output_contains \
+    "slash and dot traversal payload shows invalid template_type error" \
+    "Invalid TEMPLATE_TYPE" \
+    bash "$GENERATOR" standard/../../evil
+
 assert_output_contains \
     "no-args error mentions TEMPLATE_TYPE" \
     "TEMPLATE_TYPE" \
@@ -213,15 +235,29 @@ fi
 
 # Default output path: when no OUTPUT_FILE is given the file lands in CWD
 ORIG_DIR="$(pwd)"
-cd "$TEMP_DIR"
+WORK_DIR="${TEMP_DIR}/workspace"
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
 assert_exit_code \
     "default output path (no output arg) exits 0" \
     0 \
     bash "$GENERATOR" standard
-if [[ -f "${TEMP_DIR}/standard-script.sh" ]]; then
+if [[ -f "${WORK_DIR}/standard-script.sh" ]]; then
     pass "default output file ./standard-script.sh was created"
 else
     fail "default output file ./standard-script.sh was not created"
+fi
+
+TRAVERSAL_TARGET="${TEMP_DIR}/templates/standard-script.sh"
+rm -rf "${TEMP_DIR}/templates"
+assert_exit_code \
+    "traversal payload with default output exits non-zero" \
+    1 \
+    bash "$GENERATOR" ../templates/standard
+if [[ ! -e "$TRAVERSAL_TARGET" ]]; then
+    pass "traversal payload did not create file outside current directory"
+else
+    fail "traversal payload created unexpected file: $TRAVERSAL_TARGET"
 fi
 cd "$ORIG_DIR"
 
@@ -324,6 +360,47 @@ assert_output_not_contains \
     "report file content excludes confirmation message" \
     "Report saved to" \
     cat "$REPORT"
+
+# ─── run_ci_checks.sh: determinism and shellcheck gating ───────────────────
+
+echo ""
+echo "[run_ci_checks.sh — deterministic validation]"
+
+SHELLCHECK_STUB="${TEMP_DIR}/shellcheck-stub.sh"
+cat > "$SHELLCHECK_STUB" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$SHELLCHECK_STUB"
+
+assert_exit_code \
+    "ci runner --help exits 0" \
+    0 \
+    bash "$CI_RUNNER" --help
+
+assert_exit_code \
+    "ci runner succeeds when shellcheck is required and stubbed" \
+    0 \
+    env SHELLCHECK_BIN="$SHELLCHECK_STUB" \
+    bash "$CI_RUNNER" --require-shellcheck --skip-regression-tests
+
+assert_exit_code \
+    "ci runner fails when required shellcheck is unavailable" \
+    1 \
+    env SHELLCHECK_BIN="${TEMP_DIR}/missing-shellcheck" \
+    bash "$CI_RUNNER" --require-shellcheck --skip-regression-tests
+
+assert_output_contains \
+    "required-shellcheck failure message is explicit" \
+    "shellcheck is required but not available" \
+    env SHELLCHECK_BIN="${TEMP_DIR}/missing-shellcheck" \
+    bash "$CI_RUNNER" --require-shellcheck --skip-regression-tests
+
+assert_exit_code \
+    "CI=true defaults to requiring shellcheck" \
+    1 \
+    env CI=true SHELLCHECK_BIN="${TEMP_DIR}/missing-shellcheck" \
+    bash "$CI_RUNNER" --skip-regression-tests
 
 # ─── summary ────────────────────────────────────────────────────────────────
 

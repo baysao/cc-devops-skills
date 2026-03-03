@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Any, Pattern
 
+from step_walker import iter_steps
+
 
 class SecurityIssue:
     """Represents a security issue"""
@@ -422,57 +424,13 @@ class SecurityScanner:
                             ))
 
     def _traverse_steps(self, callback):
-        """Traverse all steps in the pipeline and apply callback"""
+        """Traverse all steps in the pipeline and apply callback."""
+        steps_by_context: Dict[str, List[Any]] = {}
+        for step, context in iter_steps(self.config):
+            steps_by_context.setdefault(context, []).append(step)
 
-        def process_steps(steps: List[Any], context: str):
-            if isinstance(steps, list):
-                callback(steps, context)
-
-        # Steps at pipeline level
-        if 'steps' in self.config:
-            process_steps(self.config['steps'], 'pipeline')
-
-        # Steps in jobs
-        if 'jobs' in self.config:
-            for job in self.config['jobs']:
-                if isinstance(job, dict):
-                    job_name = job.get('job') or job.get('deployment', 'unknown')
-                    if 'steps' in job:
-                        process_steps(job['steps'], f"job '{job_name}'")
-
-                    # Deployment strategy steps
-                    if 'strategy' in job and isinstance(job['strategy'], dict):
-                        for strategy_type in ['runOnce', 'rolling', 'canary']:
-                            if strategy_type in job['strategy']:
-                                strategy = job['strategy'][strategy_type]
-                                if isinstance(strategy, dict):
-                                    for phase in ['preDeploy', 'deploy', 'routeTraffic', 'postRouteTraffic', 'on']:
-                                        if phase in strategy:
-                                            phase_data = strategy[phase]
-                                            if isinstance(phase_data, dict) and 'steps' in phase_data:
-                                                process_steps(phase_data['steps'], f"job '{job_name}' {strategy_type}.{phase}")
-
-        # Steps in stages
-        if 'stages' in self.config:
-            for stage in self.config['stages']:
-                if isinstance(stage, dict):
-                    for job in stage.get('jobs', []):
-                        if isinstance(job, dict):
-                            job_name = job.get('job') or job.get('deployment', 'unknown')
-                            if 'steps' in job:
-                                process_steps(job['steps'], f"job '{job_name}'")
-
-                            # Deployment strategy steps
-                            if 'strategy' in job and isinstance(job['strategy'], dict):
-                                for strategy_type in ['runOnce', 'rolling', 'canary']:
-                                    if strategy_type in job['strategy']:
-                                        strategy = job['strategy'][strategy_type]
-                                        if isinstance(strategy, dict):
-                                            for phase in ['preDeploy', 'deploy', 'routeTraffic', 'postRouteTraffic', 'on']:
-                                                if phase in strategy:
-                                                    phase_data = strategy[phase]
-                                                    if isinstance(phase_data, dict) and 'steps' in phase_data:
-                                                        process_steps(phase_data['steps'], f"job '{job_name}' {strategy_type}.{phase}")
+        for context, steps in steps_by_context.items():
+            callback(steps, context)
 
 
 def main():

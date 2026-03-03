@@ -81,9 +81,14 @@ variable "encrypt" {}
 
 ```hcl
 terraform {
-  required_version = ">= 1.10, < 2.0"  # Use 1.10+ for modern features (ephemeral resources, write-only)
+  required_version = ">= 1.10, < 2.0"  # Baseline when using ephemeral features without write-only arguments
 }
 ```
+
+Version feature gates:
+- Use `required_version = ">= 1.11, < 2.0"` when write-only arguments (`*_wo`) are used.
+- Use `required_version = ">= 1.10, < 2.0"` for ephemeral-only configurations.
+- If neither write-only nor ephemeral features are used, follow the repository baseline (for example `>= 1.8, < 2.0`).
 
 ### Provider Versions
 

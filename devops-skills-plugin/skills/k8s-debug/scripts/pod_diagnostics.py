@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Sequence, Tuple
 
 REQUEST_TIMEOUT = os.environ.get("K8S_REQUEST_TIMEOUT", "15s")
@@ -80,7 +80,7 @@ def get_pod_info(pod_name: str, namespace: str = "default") -> None:
 
     print(f"\n{'=' * 80}")
     print(f"Pod Diagnostics for: {pod_name} (namespace: {namespace})")
-    print(f"Timestamp: {datetime.utcnow().isoformat(timespec='seconds')}Z")
+    print(f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
     print(f"{'=' * 80}\n")
 
     # Pod Status

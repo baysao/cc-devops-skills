@@ -7,13 +7,26 @@ Supports multiple input sources, filters, and output destinations.
 """
 
 import argparse
+import inspect
 import sys
+import warnings
 from typing import Dict, Optional, Callable, Any
 from urllib.parse import urlparse
 
 
 class FluentBitConfigGenerator:
     """Generates Fluent Bit configuration files with best practices built-in."""
+
+    _DEPRECATED_KWARG_ALIASES: Dict[str, Dict[str, str]] = {
+        "syslog-forward": {
+            "forward_host": "syslog_host",
+            "forward_port": "syslog_port",
+        },
+        "file-tail-s3": {
+            "file_path": "log_path",
+        },
+    }
+    _DEPRECATION_REMOVAL_DATE = "2026-09-01"
 
     def __init__(self) -> None:
         """Initialize the generator with available use cases."""
@@ -45,7 +58,7 @@ class FluentBitConfigGenerator:
             Generated Fluent Bit configuration as a string
 
         Raises:
-            ValueError: If use case is not recognized
+            ValueError: If use case is not recognized or kwargs are invalid
         """
         if use_case not in self.use_cases:
             available = ", ".join(self.use_cases.keys())
@@ -53,7 +66,50 @@ class FluentBitConfigGenerator:
                 f"Unknown use case: {use_case}\n"
                 f"Available use cases: {available}"
             )
-        return self.use_cases[use_case](**kwargs)
+        normalized_kwargs = self._normalize_kwargs(use_case, kwargs)
+        return self.use_cases[use_case](**normalized_kwargs)
+
+    def _allowed_kwargs_for(self, use_case: str) -> set[str]:
+        """Return accepted keyword names for a use case method signature."""
+        signature = inspect.signature(self.use_cases[use_case])
+        return {
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+
+    def _normalize_kwargs(self, use_case: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Map deprecated kwargs and reject unknown kwargs."""
+        normalized = dict(kwargs)
+
+        for old_name, new_name in self._DEPRECATED_KWARG_ALIASES.get(use_case, {}).items():
+            if old_name not in normalized:
+                continue
+
+            old_value = normalized.pop(old_name)
+            if new_name not in normalized or normalized[new_name] is None:
+                normalized[new_name] = old_value
+
+            warnings.warn(
+                (
+                    f"'{old_name}' is deprecated for use case '{use_case}'; "
+                    f"use '{new_name}' instead. Support will be removed after "
+                    f"{self._DEPRECATION_REMOVAL_DATE}."
+                ),
+                DeprecationWarning,
+                stacklevel=3,
+            )
+
+        allowed_kwargs = self._allowed_kwargs_for(use_case)
+        unknown_kwargs = sorted(set(normalized) - allowed_kwargs)
+        if unknown_kwargs:
+            unknown_text = ", ".join(unknown_kwargs)
+            raise ValueError(
+                f"Unknown parameter(s) for use case '{use_case}': {unknown_text}"
+            )
+
+        return normalized
 
     @staticmethod
     def _parse_otlp_endpoint(endpoint: str) -> tuple[str, int, str]:
@@ -1093,8 +1149,14 @@ def main() -> None:
             "app_name",
             "language",
         ],
-        "syslog-forward": ["listen_port", "syslog_host", "syslog_port"],
-        "file-tail-s3": ["log_path", "s3_bucket", "s3_region"],
+        "syslog-forward": [
+            "listen_port",
+            "syslog_host",
+            "syslog_port",
+            "forward_host",
+            "forward_port",
+        ],
+        "file-tail-s3": ["log_path", "file_path", "s3_bucket", "s3_region"],
         "http-kafka": ["http_port", "kafka_brokers", "kafka_topic"],
         "multi-destination": ["es_host", "s3_bucket"],
         "prometheus-metrics": [
@@ -1168,6 +1230,7 @@ def main() -> None:
 
     # Application options
     parser.add_argument("--log-path", default=None, help="Log file path")
+    parser.add_argument("--file-path", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--app-name", default=None, help="Application name")
     parser.add_argument(
         "--language",
@@ -1223,7 +1286,7 @@ def main() -> None:
         "--tls-verify",
         dest="tls_verify",
         action="store_true",
-        default=True,
+        default=None,
         help="Verify TLS certificates (default: enabled)",
     )
     tls_group.add_argument(
@@ -1250,10 +1313,18 @@ def main() -> None:
     generator = FluentBitConfigGenerator()
     try:
         effective_args: Dict[str, Any] = vars(args).copy()
-        if effective_args.get("syslog_host") is None and effective_args.get("forward_host"):
-            effective_args["syslog_host"] = effective_args["forward_host"]
-        if effective_args.get("syslog_port") is None and effective_args.get("forward_port") is not None:
-            effective_args["syslog_port"] = effective_args["forward_port"]
+        known_use_case_keys = {name for values in use_case_arg_map.values() for name in values}
+        unsupported = sorted(
+            key
+            for key in known_use_case_keys
+            if key not in use_case_arg_map[args.use_case] and effective_args.get(key) is not None
+        )
+        if unsupported:
+            unsupported_text = ", ".join(unsupported)
+            raise ValueError(
+                f"Unsupported parameter(s) for use case '{args.use_case}': "
+                f"{unsupported_text}"
+            )
 
         selected_kwargs = {
             key: effective_args[key]

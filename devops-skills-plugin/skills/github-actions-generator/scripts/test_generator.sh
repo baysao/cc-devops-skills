@@ -9,7 +9,7 @@
 #   4. SHA consistency        — templates/examples use the canonical SHAs from
 #                               references/common-actions.md
 #   5. Required workflow keys — example workflows contain mandatory top-level keys
-#   6. Template placeholder   — basic_workflow.yml has no raw YAML-breaking brackets
+#   6. Template placeholders  — workflow/docker templates keep safe placeholders
 #
 # Prerequisites: yamllint must be installed (pip install yamllint)
 #
@@ -53,7 +53,7 @@ assert_file_contains() {
     local label="$1"
     local file="$2"
     local pattern="$3"
-    if grep -qE "$pattern" "$file"; then
+    if grep -qE -- "$pattern" "$file"; then
         pass "$label"
     else
         fail "$label — pattern '$pattern' not found in $file"
@@ -64,11 +64,11 @@ assert_file_not_contains() {
     local label="$1"
     local file="$2"
     local pattern="$3"
-    if ! grep -qE "$pattern" "$file"; then
+    if ! grep -qE -- "$pattern" "$file"; then
         pass "$label"
     else
         fail "$label — unexpected pattern '$pattern' found in $file"
-        grep -nE "$pattern" "$file" | sed 's/^/    /' || true
+        grep -nE -- "$pattern" "$file" | sed 's/^/    /' || true
     fi
 }
 
@@ -79,6 +79,28 @@ assert_file_ends_with_newline() {
         pass "$label"
     else
         fail "$label — $file is missing a trailing newline"
+    fi
+}
+
+assert_text_matches_pattern() {
+    local label="$1"
+    local text="$2"
+    local pattern="$3"
+    if echo "$text" | grep -qE "$pattern"; then
+        pass "$label"
+    else
+        fail "$label — text did not match pattern '$pattern': $text"
+    fi
+}
+
+assert_text_not_matches_pattern() {
+    local label="$1"
+    local text="$2"
+    local pattern="$3"
+    if ! echo "$text" | grep -qE "$pattern"; then
+        pass "$label"
+    else
+        fail "$label — text unexpectedly matched pattern '$pattern': $text"
     fi
 }
 
@@ -110,6 +132,10 @@ readonly SHA_CACHE="cdf6c1fa76f9f475f3d7449005a359c84ca0f306"              # v5.
 readonly SHA_UPLOAD_ARTIFACT="5d5d22a31266ced268874388b861e4b58bb5c2f3"    # v4.3.1
 readonly SHA_DOWNLOAD_ARTIFACT="c850b930e6ba138125429b7e5c93fc707a7f8427" # v4.1.4
 readonly SHA_GITHUB_SCRIPT="60a0d83039c74a4aee543508d2ffcb1c3799cdea"     # v7.0.1
+readonly SHA_DEPENDENCY_REVIEW="05fe4576374b728f0c523d6a13d64c25081e0803"  # v4.8.3
+readonly SHA_ATTEST_SBOM="bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b"        # v2.4.0
+readonly SHA_ATTEST_BUILD_PROVENANCE="e8998f949152b193b063cb0ec769d69d929409be" # v2.4.0
+readonly SHA_CODEQL_ACTION="ae9ef3a1d2e3413523c3741725c30064970cc0d4"      # v3.32.5
 
 # ─── 1. YAML syntax validity ─────────────────────────────────────────────────
 
@@ -135,58 +161,40 @@ echo ""
 
 echo "[2] SHA pinning compliance (no bare @vN refs in positive examples)"
 
-# Pattern matches unpinned action refs like @v1, @v2, ... @v99
-# We check examples and templates — NOT reference .md files
-# (reference .md files use @vN intentionally in anti-pattern sections)
-UNPINNED_PATTERN='uses: [a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+@v[0-9]'
+# Pattern matches mutable tag refs in uses:, including nested action paths.
+# Examples detected:
+#   uses: actions/checkout@v6
+#   uses: github/codeql-action/upload-sarif@v3
+#   uses: owner/repo/sub/path@v1.2.3
+# We check examples/templates only — reference .md files are excluded.
+readonly UNPINNED_PATTERN='^[[:space:]]*uses:[[:space:]]*[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*@v[0-9]+(\.[0-9]+){0,2}([[:space:]]|$)'
 
-# Actions whose SHAs are not yet documented in references/common-actions.md.
-# These are flagged as warnings, not failures, until their SHAs are added.
-# TODO: Add SHAs for these actions to references/common-actions.md and
-#       update the examples to pin them.
-NEEDS_SHA_ACTIONS=(
-    "actions/dependency-review-action"    # listed in common-actions.md without SHA
-    "actions/attest-sbom"                 # listed in common-actions.md without SHA
-    "actions/attest-build-provenance"     # not in common-actions.md; needs docs + SHA
-)
+echo "  [2a] Regex regression checks"
+assert_text_matches_pattern \
+    "matches top-level action major tag" \
+    "        uses: actions/dependency-review-action@v4" \
+    "$UNPINNED_PATTERN"
+assert_text_matches_pattern \
+    "matches nested action path major tag" \
+    "        uses: github/codeql-action/upload-sarif@v3" \
+    "$UNPINNED_PATTERN"
+assert_text_matches_pattern \
+    "matches nested action path semver tag" \
+    "        uses: owner/repo/sub-path@v3.2.1 # mutable" \
+    "$UNPINNED_PATTERN"
+assert_text_not_matches_pattern \
+    "does not match full SHA pin" \
+    "        uses: github/codeql-action/upload-sarif@ae9ef3a1d2e3413523c3741725c30064970cc0d4 # v3.32.5" \
+    "$UNPINNED_PATTERN"
 
 for f in "${TEMPLATE_FILES[@]}" "${EXAMPLE_FILES[@]}"; do
     rel="${f#"$SKILL_DIR/"}"
-    all_unpinned=$(grep -nE "$UNPINNED_PATTERN" "$f" || true)
-
-    if [ -z "$all_unpinned" ]; then
+    unpinned=$(grep -nE "$UNPINNED_PATTERN" "$f" || true)
+    if [ -z "$unpinned" ]; then
         pass "no unpinned refs: $rel"
-        continue
-    fi
-
-    # Separate into known-undocumented (warning) vs actual violations (failure)
-    unresolved_violations=""
-    while IFS= read -r line; do
-        is_known=false
-        for known in "${NEEDS_SHA_ACTIONS[@]}"; do
-            if echo "$line" | grep -qF "$known"; then
-                is_known=true
-                break
-            fi
-        done
-        if ! $is_known; then
-            unresolved_violations+="$line"$'\n'
-        fi
-    done <<< "$all_unpinned"
-
-    known_count=$(echo "$all_unpinned" | wc -l)
-    violation_count=0
-    if [ -n "$unresolved_violations" ]; then
-        violation_count=$(echo "$unresolved_violations" | grep -c . || true)
-    fi
-
-    if [ "$violation_count" -eq 0 ]; then
-        pass "no unpinned refs (known-undocumented actions skipped): $rel"
-        echo "    NOTE: $(echo "$all_unpinned" | grep -c . || true) action(s) need SHA pinning in common-actions.md"
-        echo "$all_unpinned" | sed 's/^/    WARN: /'
     else
         fail "unpinned action ref(s) in: $rel"
-        echo "$unresolved_violations" | sed 's/^/    /'
+        echo "$unpinned" | sed 's/^/    /'
     fi
 done
 echo ""
@@ -249,6 +257,24 @@ for f in "${TEMPLATE_FILES[@]}" "${EXAMPLE_FILES[@]}"; do
     if grep -qE "uses: actions/github-script@" "$f" 2>/dev/null; then
         check_sha_consistency "actions/github-script" "$SHA_GITHUB_SCRIPT" "$f"
     fi
+    if grep -qE "uses: actions/dependency-review-action@" "$f" 2>/dev/null; then
+        check_sha_consistency "actions/dependency-review-action" "$SHA_DEPENDENCY_REVIEW" "$f"
+    fi
+    if grep -qE "uses: actions/attest-sbom@" "$f" 2>/dev/null; then
+        check_sha_consistency "actions/attest-sbom" "$SHA_ATTEST_SBOM" "$f"
+    fi
+    if grep -qE "uses: actions/attest-build-provenance@" "$f" 2>/dev/null; then
+        check_sha_consistency "actions/attest-build-provenance" "$SHA_ATTEST_BUILD_PROVENANCE" "$f"
+    fi
+    if grep -qE "uses: github/codeql-action/init@" "$f" 2>/dev/null; then
+        check_sha_consistency "github/codeql-action/init" "$SHA_CODEQL_ACTION" "$f"
+    fi
+    if grep -qE "uses: github/codeql-action/analyze@" "$f" 2>/dev/null; then
+        check_sha_consistency "github/codeql-action/analyze" "$SHA_CODEQL_ACTION" "$f"
+    fi
+    if grep -qE "uses: github/codeql-action/upload-sarif@" "$f" 2>/dev/null; then
+        check_sha_consistency "github/codeql-action/upload-sarif" "$SHA_CODEQL_ACTION" "$f"
+    fi
 done
 echo ""
 
@@ -276,6 +302,7 @@ echo ""
 echo "[6] Template placeholder integrity"
 
 BASIC_TEMPLATE="$SKILL_DIR/assets/templates/workflow/basic_workflow.yml"
+DOCKER_TEMPLATE="$SKILL_DIR/assets/templates/action/docker/Dockerfile"
 
 # Verify the step name with brackets is quoted (prevents YAML parse error)
 assert_file_contains \
@@ -294,6 +321,17 @@ if command -v yamllint >/dev/null 2>&1; then
         echo "$errors" | sed 's/^/    /'
     fi
 fi
+
+assert_file_contains \
+    "docker action template: has package-install flags placeholder" \
+    "$DOCKER_TEMPLATE" \
+    '\[PACKAGE_INSTALL_FLAGS\]'
+
+assert_file_not_contains \
+    "docker action template: no apt-only hardcoded install flags" \
+    "$DOCKER_TEMPLATE" \
+    '--no-install-recommends'
+
 echo ""
 
 # ─── summary ─────────────────────────────────────────────────────────────────

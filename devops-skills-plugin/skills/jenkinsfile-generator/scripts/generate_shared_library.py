@@ -401,7 +401,19 @@ def call(Map config = [:]) {{
     def environment = config.get('environment', 'dev')
     def kubeConfig = config.get('kubeConfig')
     def namespace = config.get('namespace', 'default')
-    def deploymentName = config.get('deploymentName', env.JOB_NAME)
+    def rawDeploymentName = config.get('deploymentName', env.JOB_BASE_NAME ?: '')
+    def deploymentName = rawDeploymentName
+        .toString()
+        .toLowerCase()
+        .replaceAll(/[^a-z0-9-]/, '-')
+        .replaceAll(/-+/, '-')
+        .replaceAll(/^-|-$/, '')
+    if (deploymentName.length() > 63) {{
+        deploymentName = deploymentName.substring(0, 63).replaceAll(/-+$/, '')
+    }}
+    if (!deploymentName?.trim()) {{
+        error "deploymentName is required and must resolve to a valid Kubernetes deployment name"
+    }}
     def manifests = config.get('manifests', 'k8s/')
     def approval = config.get('approval', environment != 'dev')
 
@@ -416,10 +428,17 @@ def call(Map config = [:]) {{
     stage("Deploy to ${{environment}}") {{
         if (kubeConfig) {{
             withCredentials([file(credentialsId: kubeConfig, variable: 'KUBECONFIG')]) {{
-                sh """
-                    kubectl apply -f ${{manifests}} -n ${{namespace}}
-                    kubectl rollout status deployment/${{deploymentName}} -n ${{namespace}} --timeout=300s
-                """
+                withEnv([
+                    "KUBE_NAMESPACE=${{namespace}}",
+                    "DEPLOYMENT_NAME=${{deploymentName}}",
+                    "MANIFESTS_PATH=${{manifests}}",
+                ]) {{
+                    sh(label: 'Deploy manifests', script: """
+                        set -euo pipefail
+                        kubectl apply -f "$MANIFESTS_PATH" -n "$KUBE_NAMESPACE"
+                        kubectl rollout status "deployment/$DEPLOYMENT_NAME" -n "$KUBE_NAMESPACE" --timeout=300s
+                    """)
+                }}
             }}
         }} else {{
             error "kubeConfig credential ID is required for deployment"

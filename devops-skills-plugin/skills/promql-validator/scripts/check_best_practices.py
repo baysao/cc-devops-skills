@@ -765,14 +765,19 @@ class PromQLBestPracticesChecker:
 
     def _check_high_cardinality_labels_in_aggregation(self):
         """
-        Check for known high-cardinality label names inside by() or without() clauses.
+        Check for known high-cardinality label names inside aggregation group labels.
 
         Per best_practices.md: Labels like user_id, session_id, request_id, IP addresses,
         full URLs, and UUIDs create one series per unique value, which can be millions of
-        series. They should not appear in aggregation dimensions.
+        series. They should not appear in by(...) dimensions.
+
+        Important semantic note:
+        - by(...) keeps the listed labels in the grouping key (risky for high-cardinality).
+        - without(...) removes the listed labels from the grouping key (often the opposite
+          of the risk we're checking), so we intentionally do not warn on those labels.
         """
-        # Extract all by(...) and without(...) clause contents
-        agg_clause_pattern = r'\b(?:by|without)\s*\(([^)]*)\)'
+        # Extract aggregation grouping clauses with their mode (by|without)
+        agg_clause_pattern = r'\b(by|without)\s*\(([^)]*)\)'
         clauses = re.findall(agg_clause_pattern, self.query)
 
         # High-cardinality label name indicators (from best_practices.md)
@@ -789,7 +794,10 @@ class PromQLBestPracticesChecker:
         )
 
         found = []
-        for clause in clauses:
+        for mode, clause in clauses:
+            if mode.lower() != 'by':
+                continue
+
             # Split on commas and strip whitespace to get individual label names
             label_names = [lbl.strip() for lbl in clause.split(',') if lbl.strip()]
             for label in label_names:
@@ -803,12 +811,12 @@ class PromQLBestPracticesChecker:
             label_list = ', '.join(dict.fromkeys(found))  # deduplicate, preserve order
             self.issues.append({
                 'type': 'high_cardinality_aggregation_label',
-                'message': f'Aggregating by high-cardinality label(s): {label_list}',
+                'message': f'by(...) includes high-cardinality label(s): {label_list}',
                 'severity': 'warning',
                 'recommendation': (
                     f'Labels like {label_list} can have millions of unique values, '
                     'creating one time series per value and degrading query performance. '
-                    'Remove them from by()/without() or replace with lower-cardinality alternatives '
+                    'Remove them from by() or replace with lower-cardinality alternatives '
                     '(e.g. use "service" instead of "user_id").'
                 )
             })

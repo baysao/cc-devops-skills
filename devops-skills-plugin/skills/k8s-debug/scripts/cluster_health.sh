@@ -5,6 +5,38 @@
 set -uo pipefail
 
 REQUEST_TIMEOUT="${K8S_REQUEST_TIMEOUT:-15s}"
+STRICT_MODE=0
+
+WARN_COUNT=0
+CHECK_FAIL_COUNT=0
+BLOCKED_COUNT=0
+
+usage() {
+    echo "Usage: $0 [--strict]"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict)
+            STRICT_MODE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -*)
+            echo "ERROR: Unknown option '$1'." >&2
+            usage
+            exit 1
+            ;;
+        *)
+            echo "ERROR: Unexpected positional argument '$1'." >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 timestamp_utc() {
     date -u +"%Y-%m-%d %H:%M:%S UTC"
@@ -14,8 +46,13 @@ section() {
     printf "\n## %s ##\n" "$1"
 }
 
-warn() {
+warn_raw() {
     printf "WARN: %s\n" "$1" >&2
+}
+
+warn() {
+    warn_raw "$1"
+    WARN_COUNT=$((WARN_COUNT + 1))
 }
 
 info() {
@@ -34,7 +71,8 @@ run_or_warn() {
     local description="$1"
     shift
     if ! "$@"; then
-        warn "${description} failed; continuing."
+        warn_raw "${description} failed; continuing."
+        CHECK_FAIL_COUNT=$((CHECK_FAIL_COUNT + 1))
         return 1
     fi
     return 0
@@ -44,10 +82,18 @@ run_pipe_or_warn() {
     local description="$1"
     local cmd="$2"
     if ! bash -o pipefail -c "$cmd"; then
-        warn "${description} failed; continuing."
+        warn_raw "${description} failed; continuing."
+        CHECK_FAIL_COUNT=$((CHECK_FAIL_COUNT + 1))
         return 1
     fi
     return 0
+}
+
+blocked_exit() {
+    local message="$1"
+    BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+    printf "ERROR: %s\n" "$message" >&2
+    exit 2
 }
 
 find_waiting_reason_pods() {
@@ -75,9 +121,25 @@ find_waiting_reason_pods() {
     kubectl_cmd get pods --all-namespaces --field-selector=status.phase!=Running,status.phase!=Succeeded
 }
 
+finalize_exit() {
+    if [ "$BLOCKED_COUNT" -gt 0 ]; then
+        return 2
+    fi
+    if [ "$CHECK_FAIL_COUNT" -gt 0 ]; then
+        return 1
+    fi
+    if [ "$STRICT_MODE" -eq 1 ] && [ "$WARN_COUNT" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
 if ! have_cmd kubectl; then
-    echo "ERROR: kubectl is not installed or not in PATH." >&2
-    exit 1
+    blocked_exit "kubectl is not installed or not in PATH."
+fi
+
+if ! kubectl_cmd config current-context >/dev/null 2>&1; then
+    blocked_exit "No active Kubernetes context. Run 'kubectl config current-context' to troubleshoot."
 fi
 
 echo "========================================"
@@ -89,6 +151,7 @@ section "PREFLIGHT"
 run_or_warn "Current context check" kubectl_cmd config current-context
 if ! have_cmd jq; then
     info "jq is optional. Error-state filtering will use a broader fallback."
+    warn "jq is not installed; waiting-reason filtering will fall back to non-running pod lists."
 fi
 
 section "CLUSTER INFO"
@@ -140,10 +203,10 @@ section "API SERVER HEALTH"
 run_or_warn "API server health check" kubectl_cmd get '--raw=/healthz?verbose'
 
 section "CRASHLOOPBACKOFF PODS"
-find_waiting_reason_pods "CrashLoopBackOff" || true
+run_or_warn "CrashLoopBackOff pod query" find_waiting_reason_pods "CrashLoopBackOff"
 
 section "IMAGEPULLBACKOFF PODS"
-find_waiting_reason_pods "ImagePullBackOff" || true
+run_or_warn "ImagePullBackOff pod query" find_waiting_reason_pods "ImagePullBackOff"
 
 section "NETWORK POLICIES"
 run_or_warn "Network policy list" kubectl_cmd get networkpolicies --all-namespaces
@@ -156,4 +219,8 @@ run_or_warn "Ingress list" kubectl_cmd get ingresses --all-namespaces
 
 echo -e "\n========================================"
 echo "Health check completed at $(timestamp_utc)"
+echo "Warnings: $WARN_COUNT | Check failures: $CHECK_FAIL_COUNT | Blocked checks: $BLOCKED_COUNT"
 echo "========================================"
+
+finalize_exit
+exit $?

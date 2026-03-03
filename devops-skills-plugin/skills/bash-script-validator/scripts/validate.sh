@@ -22,6 +22,28 @@ STYLE_COUNT=0
 # Script path
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ShellCheck policy:
+# - default strict in CI
+# - override with VALIDATOR_REQUIRE_SHELLCHECK=0|1
+REQUIRE_SHELLCHECK="${VALIDATOR_REQUIRE_SHELLCHECK:-}"
+if [[ -z "$REQUIRE_SHELLCHECK" ]]; then
+    if [[ -n "${CI:-}" ]]; then
+        REQUIRE_SHELLCHECK=1
+    else
+        REQUIRE_SHELLCHECK=0
+    fi
+fi
+
+# ShellCheck provider selection:
+# - auto (default): system shellcheck, then wrapper fallback
+# - system: require system shellcheck in PATH
+# - wrapper: require wrapper script
+# - disabled: skip ShellCheck stage
+SHELLCHECK_MODE="${VALIDATOR_SHELLCHECK_MODE:-auto}"
+if [[ "${VALIDATOR_DISABLE_SHELLCHECK:-0}" == "1" ]]; then
+    SHELLCHECK_MODE="disabled"
+fi
+
 usage() {
     cat <<EOF
 Usage: $0 <script-file>
@@ -147,59 +169,119 @@ validate_syntax() {
 run_shellcheck() {
     local file="$1"
     local shell_type="$2"
+    local shellcheck_mode="$SHELLCHECK_MODE"
 
     print_section "SHELLCHECK"
 
-    local shell_arg=""
+    local shell_name=""
     case "$shell_type" in
-        bash) shell_arg="-s bash" ;;
-        sh|dash) shell_arg="-s sh" ;;
-        zsh) shell_arg="-s zsh" ;;
-        ksh) shell_arg="-s ksh" ;;
+        bash) shell_name="bash" ;;
+        sh|dash) shell_name="sh" ;;
+        zsh) shell_name="zsh" ;;
+        ksh) shell_name="ksh" ;;
     esac
 
     # Determine which shellcheck to use
-    local shellcheck_cmd=""
+    local -a shellcheck_cmd=()
+    local unavailable_reason="ShellCheck unavailable"
 
-    if command -v shellcheck &>/dev/null; then
-        # System shellcheck available
-        shellcheck_cmd="shellcheck"
-    elif [[ -x "$SCRIPT_DIR/shellcheck_wrapper.sh" ]]; then
-        # Use wrapper with cache
-        shellcheck_cmd="$SCRIPT_DIR/shellcheck_wrapper.sh --cache"
-    else
-        # Neither available
-        print_warning "ShellCheck not installed. Install options:"
-        echo "  1. System-wide: brew install shellcheck (macOS)"
-        echo "                  apt-get install shellcheck (Debian/Ubuntu)"
-        echo "                  dnf install shellcheck (Fedora)"
-        echo "  2. Python venv: pip3 install shellcheck-py"
-        echo "  3. Wrapper will auto-install if python3 available"
+    case "$shellcheck_mode" in
+        auto)
+            if command -v shellcheck &>/dev/null; then
+                shellcheck_cmd=("shellcheck")
+            elif [[ -x "$SCRIPT_DIR/shellcheck_wrapper.sh" ]]; then
+                shellcheck_cmd=("$SCRIPT_DIR/shellcheck_wrapper.sh" "--cache")
+            fi
+            ;;
+        system)
+            if command -v shellcheck &>/dev/null; then
+                shellcheck_cmd=("shellcheck")
+            else
+                unavailable_reason="System shellcheck required (VALIDATOR_SHELLCHECK_MODE=system) but not found in PATH"
+            fi
+            ;;
+        wrapper)
+            if [[ -x "$SCRIPT_DIR/shellcheck_wrapper.sh" ]]; then
+                shellcheck_cmd=("$SCRIPT_DIR/shellcheck_wrapper.sh" "--cache")
+            else
+                unavailable_reason="Shellcheck wrapper required (VALIDATOR_SHELLCHECK_MODE=wrapper) but scripts/shellcheck_wrapper.sh is missing or not executable"
+            fi
+            ;;
+        disabled)
+            unavailable_reason="ShellCheck disabled by configuration"
+            ;;
+        *)
+            print_error "Invalid VALIDATOR_SHELLCHECK_MODE='$shellcheck_mode'. Use one of: auto, system, wrapper, disabled"
+            return 2
+            ;;
+    esac
+
+    if [[ ${#shellcheck_cmd[@]} -eq 0 ]]; then
+        if [[ "$REQUIRE_SHELLCHECK" == "1" ]]; then
+            print_error "$unavailable_reason; static analysis coverage is required"
+            echo "  Install options:"
+            echo "    1. System-wide: brew install shellcheck (macOS)"
+            echo "                     apt-get install shellcheck (Debian/Ubuntu)"
+            echo "                     dnf install shellcheck (Fedora)"
+            echo "    2. Python venv: pip3 install shellcheck-py"
+            echo "    3. Wrapper auto-installs when python3 is available"
+            return 2
+        fi
+
+        print_warning "$unavailable_reason. Static analysis coverage is partial."
+        echo "  Install options:"
+        echo "    1. System-wide: brew install shellcheck (macOS)"
+        echo "                     apt-get install shellcheck (Debian/Ubuntu)"
+        echo "                     dnf install shellcheck (Fedora)"
+        echo "    2. Python venv: pip3 install shellcheck-py"
+        echo "    3. Wrapper auto-installs when python3 is available"
         return 0
     fi
 
+    local -a shellcheck_args=()
+    if [[ -n "$shell_name" ]]; then
+        shellcheck_args+=("-s" "$shell_name")
+    fi
+
     local output
-    if output=$($shellcheck_cmd $shell_arg -f gcc "$file" 2>&1); then
+    local shellcheck_exit=0
+    if output=$("${shellcheck_cmd[@]}" "${shellcheck_args[@]}" -f gcc "$file" 2>&1); then
         print_success "No ShellCheck issues found"
         return 0
     else
-        local error_lines warning_lines info_lines style_lines
+        shellcheck_exit=$?
+    fi
+
+    if [[ "$shellcheck_exit" -eq 1 ]]; then
+        local error_lines warning_lines info_lines style_lines total_lines
 
         error_lines=$(echo "$output" | grep -c ": error:" || true)
         warning_lines=$(echo "$output" | grep -c ": warning:" || true)
         info_lines=$(echo "$output" | grep -c ": note:" || true)
         style_lines=$(echo "$output" | grep -c ": style:" || true)
+        total_lines=$((error_lines + warning_lines + info_lines + style_lines))
 
         ERROR_COUNT=$((ERROR_COUNT + error_lines))
         WARNING_COUNT=$((WARNING_COUNT + warning_lines))
         INFO_COUNT=$((INFO_COUNT + info_lines))
         STYLE_COUNT=$((STYLE_COUNT + style_lines))
 
+        # Keep validator non-green even if output format is unexpected.
+        if [[ "$total_lines" -eq 0 ]]; then
+            print_warning "ShellCheck reported issues, but no severity markers were parsed"
+        fi
+
         echo "$output"
         echo ""
         print_info "See https://www.shellcheck.net/wiki/ for detailed explanations"
         return 1
     fi
+
+    print_error "ShellCheck execution failed (exit $shellcheck_exit)"
+    if [[ -n "$output" ]]; then
+        echo "$output"
+    fi
+    return 2
 }
 
 # Grep for a pattern in a file, excluding comment-only lines.
@@ -275,24 +357,36 @@ run_custom_checks() {
             found_issues=1
         fi
 
-        # Check for function keyword (bash-specific) — anchored at ^ so comment lines are safe
-        if grep -E -n '^function[[:space:]]' "$file" >/dev/null 2>&1; then
+        # Check for function keyword (bash-specific)
+        if grep_code -E '^[[:space:]]*function[[:space:]]' "$file" >/dev/null 2>&1; then
             print_warning "Bash-specific 'function' keyword in sh script"
-            grep -E -n '^function[[:space:]]' "$file" | sed 's/^/  Line /'
+            grep_code -E '^[[:space:]]*function[[:space:]]' "$file" | sed 's/^/  Line /'
             found_issues=1
         fi
 
-        # Check for source command (bash-specific, use . instead) — anchored at ^ so comment lines are safe
-        if grep -E -n '^source[[:space:]]' "$file" >/dev/null 2>&1; then
+        # Check for source command (bash-specific, use . instead)
+        if grep_code -E '^[[:space:]]*source[[:space:]]' "$file" >/dev/null 2>&1; then
             print_warning "Bash-specific 'source' command in sh script. Use '.' instead"
-            grep -E -n '^source[[:space:]]' "$file" | sed 's/^/  Line /'
+            grep_code -E '^[[:space:]]*source[[:space:]]' "$file" | sed 's/^/  Line /'
             found_issues=1
         fi
     fi
 
     # Check for missing error handling
-    if ! grep -E -q '(set -e|set -o errexit)' "$file" && ! grep -E -q 'trap.*ERR' "$file"; then
-        print_info "Consider adding error handling (set -e or trap)"
+    local has_error_handling=0
+
+    if grep_code -E '^[[:space:]]*set[[:space:]]+-[[:alpha:]]*e[[:alpha:]]*([[:space:]]|$)' "$file" >/dev/null 2>&1; then
+        has_error_handling=1
+    fi
+    if grep_code -E '^[[:space:]]*set[[:space:]]+-o[[:space:]]+errexit([[:space:]]|$)' "$file" >/dev/null 2>&1; then
+        has_error_handling=1
+    fi
+    if grep_code -E '^[[:space:]]*trap[[:space:]].*ERR([[:space:]]|$)' "$file" >/dev/null 2>&1; then
+        has_error_handling=1
+    fi
+
+    if [[ "$has_error_handling" -eq 0 ]]; then
+        print_info "Consider adding error handling (set -e/-o errexit or trap ERR)"
         found_issues=1
     fi
 

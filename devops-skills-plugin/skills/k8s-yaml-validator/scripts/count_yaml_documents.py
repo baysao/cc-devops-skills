@@ -7,11 +7,12 @@ contains syntax errors.
 """
 
 import json
-import re
 import sys
 from pathlib import Path
+import re
 
-SEPARATOR_RE = re.compile(r"^\s*---\s*$")
+DOC_START_RE = re.compile(r"^---[ \t]*$")
+DOC_END_RE = re.compile(r"^\.\.\.[ \t]*$")
 
 
 def count_yaml_documents(content: str) -> tuple[int, int]:
@@ -21,8 +22,13 @@ def count_yaml_documents(content: str) -> tuple[int, int]:
     seen_yaml_content = False
 
     for line in content.splitlines():
-        if SEPARATOR_RE.match(line):
+        if DOC_START_RE.match(line):
             separators += 1
+            if seen_yaml_content:
+                documents += 1
+            seen_yaml_content = False
+            continue
+        if DOC_END_RE.match(line):
             if seen_yaml_content:
                 documents += 1
             seen_yaml_content = False

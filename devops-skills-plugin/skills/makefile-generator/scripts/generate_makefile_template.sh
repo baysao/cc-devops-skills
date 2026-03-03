@@ -120,10 +120,23 @@ parse_args() {
     fi
 }
 
+# Escape replacement text for sed "s///" usage.
+escape_sed_replacement() {
+    printf '%s' "$1" | sed -e 's/[\\/&]/\\&/g'
+}
+
+# Render a template from stdin and replace PROJECT_NAME safely.
+render_template_with_project() {
+    local project="$1"
+    local escaped_project
+    escaped_project="$(escape_sed_replacement "$project")"
+    sed "s/PROJECT_NAME/${escaped_project}/g"
+}
+
 # Generate C project Makefile
 generate_c_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Makefile for C project
 SHELL := bash
 .ONESHELL:
@@ -189,7 +202,7 @@ EOF
 # Generate C++ project Makefile
 generate_cpp_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Makefile for C++ project
 SHELL := bash
 .ONESHELL:
@@ -255,7 +268,7 @@ EOF
 # Generate C library Makefile
 generate_c_lib_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Makefile for C library project
 .DELETE_ON_ERROR:
 
@@ -324,7 +337,7 @@ EOF
 # Generate Go project Makefile
 generate_go_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Makefile for Go project
 .PHONY: all build install test clean fmt lint help
 
@@ -383,7 +396,7 @@ EOF
 # Generate Python project Makefile
 generate_python_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Makefile for Python project
 .PHONY: all build install develop test format lint clean help
 
@@ -437,7 +450,7 @@ EOF
 # Generate Java project Makefile
 generate_java_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Makefile for Java project
 .DELETE_ON_ERROR:
 
@@ -562,7 +575,7 @@ EOF
 # Generate generic Makefile
 generate_generic_makefile() {
     local project="$1"
-    sed "s/PROJECT_NAME/${project}/g" << 'EOF'
+    render_template_with_project "$project" << 'EOF'
 # Generic Makefile
 .PHONY: all build clean install test help
 

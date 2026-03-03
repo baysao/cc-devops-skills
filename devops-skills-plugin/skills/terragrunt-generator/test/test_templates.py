@@ -8,6 +8,7 @@ Covers:
 - Required structural elements in each template
 - No deprecated flags or attributes
 - Catalog/stack value-key consistency
+- Stack references align with canonical `values.name` usage
 """
 
 import re
@@ -300,7 +301,53 @@ class StackCatalogConsistencyTests(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7. Deprecated patterns in references
+# 7. Stack references consistency
+# ──────────────────────────────────────────────────────────────────────────────
+
+class StackReferenceConsistencyTests(unittest.TestCase):
+    REFS = REFERENCES_DIR / "common-patterns.md"
+
+    def _stacks_section(self) -> str:
+        content = _read(self.REFS)
+        start_marker = "## Stacks Patterns (2025)"
+        start = content.find(start_marker)
+        self.assertNotEqual(start, -1, "Stacks section heading not found in references")
+        next_heading = content.find("\n## ", start + len(start_marker))
+        return content[start:] if next_heading == -1 else content[start:next_heading]
+
+    def test_stack_references_do_not_use_deprecated_name_keys(self):
+        section = _uncommented(self._stacks_section())
+        for deprecated_key in ("vpc_name", "db_name", "app_name"):
+            self.assertNotRegex(
+                section,
+                rf"\b{deprecated_key}\s*=",
+                f"Stacks references must not use deprecated key '{deprecated_key}'.",
+            )
+
+    def test_stack_references_use_canonical_name_key(self):
+        section = _uncommented(self._stacks_section())
+        self.assertRegex(
+            section,
+            r"\bname\s*=",
+            "Stacks references must include the canonical 'name' key in values blocks.",
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. Skill hygiene
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SkillHygieneTests(unittest.TestCase):
+    GITIGNORE = SKILL_DIR / ".gitignore"
+
+    def test_gitignore_covers_python_cache_artifacts(self):
+        content = _read(self.GITIGNORE)
+        self.assertIn("__pycache__/", content)
+        self.assertIn("*.pyc", content)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. Deprecated patterns in references
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DeprecatedPatternTests(unittest.TestCase):

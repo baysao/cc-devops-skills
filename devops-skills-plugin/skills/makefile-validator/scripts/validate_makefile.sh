@@ -30,6 +30,20 @@ INFO=0
 # Stays 0 when python3/pip3 are absent or the venv/install step fails, allowing
 # the validator to fall back to GNU make + custom checks only.
 MBAKE_AVAILABLE=0
+MBAKE_SKIP_INSTALL_MODE=0
+
+case "${MBAKE_SKIP_INSTALL:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        MBAKE_SKIP_INSTALL_MODE=1
+        ;;
+    0|false|FALSE|no|NO|off|OFF|"")
+        MBAKE_SKIP_INSTALL_MODE=0
+        ;;
+    *)
+        echo -e "${YELLOW}[WARNING]${NC} Unsupported MBAKE_SKIP_INSTALL='${MBAKE_SKIP_INSTALL}', treating as disabled"
+        ((WARNINGS+=1))
+        ;;
+esac
 
 # Temporary venv directory (unique per invocation, respects TMPDIR)
 VENV_DIR="${TMPDIR:-/tmp}/makefile-validator-venv-$$"
@@ -75,27 +89,34 @@ print_subheader() {
 check_dependencies() {
     local mbake_prereqs_ok=1
 
-    if ! command -v python3 &> /dev/null; then
-        echo -e "${YELLOW}[WARNING]${NC} python3 not found — mbake stages will be skipped"
-        echo "   Install python3 to enable mbake validation and format-check coverage"
-        ((WARNINGS++))
-        mbake_prereqs_ok=0
-    fi
+    if [ "$MBAKE_SKIP_INSTALL_MODE" -eq 1 ]; then
+        echo -e "${BLUE}ℹ${NC} MBAKE_SKIP_INSTALL=1 enabled — deterministic mode will skip mbake stages"
+        ((INFO+=1))
+    else
+        if ! command -v python3 &> /dev/null; then
+            echo -e "${YELLOW}[WARNING]${NC} python3 not found — mbake stages will be skipped"
+            echo "   Install python3 to enable mbake validation and format-check coverage"
+            ((WARNINGS+=1))
+            mbake_prereqs_ok=0
+        fi
 
-    if ! command -v pip3 &> /dev/null; then
-        echo -e "${YELLOW}[WARNING]${NC} pip3 not found — mbake stages will be skipped"
-        echo "   Install pip3 to enable mbake validation and format-check coverage"
-        ((WARNINGS++))
-        mbake_prereqs_ok=0
+        if ! command -v pip3 &> /dev/null; then
+            echo -e "${YELLOW}[WARNING]${NC} pip3 not found — mbake stages will be skipped"
+            echo "   Install pip3 to enable mbake validation and format-check coverage"
+            ((WARNINGS+=1))
+            mbake_prereqs_ok=0
+        fi
     fi
 
     if ! command -v make &> /dev/null; then
         echo -e "${YELLOW}[WARNING]${NC} GNU make not found — syntax validation will be limited"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
     fi
 
     # Signal to setup_venv (and main) that it is worth attempting venv setup
-    [ "$mbake_prereqs_ok" -eq 1 ] && MBAKE_AVAILABLE=1 || true
+    if [ "$MBAKE_SKIP_INSTALL_MODE" -eq 0 ] && [ "$mbake_prereqs_ok" -eq 1 ]; then
+        MBAKE_AVAILABLE=1
+    fi
 }
 
 # Setup virtual environment and install mbake.
@@ -107,7 +128,7 @@ setup_venv() {
 
     if ! python3 -m venv "$VENV_DIR" 2>&1; then
         echo -e "${YELLOW}⚠${NC} Failed to create virtual environment — mbake stages will be skipped"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         MBAKE_AVAILABLE=0
         return 0
     fi
@@ -120,7 +141,7 @@ setup_venv() {
     if ! pip3 install --quiet mbake 2>&1; then
         echo -e "${YELLOW}⚠${NC} Failed to install mbake — mbake stages will be skipped"
         echo "   Ensure network access or an internal PyPI mirror is available, then rerun"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         MBAKE_AVAILABLE=0
         return 0
     fi
@@ -170,7 +191,7 @@ syntax_check() {
     else
         echo -e "${RED}✗${NC} Syntax errors detected:"
         echo "$make_output"
-        ((ERRORS++))
+        ((ERRORS+=1))
         return 1
     fi
 }
@@ -185,7 +206,7 @@ mbake_validation() {
         echo -e "${GREEN}✓${NC} mbake validation passed"
     else
         echo -e "${RED}✗${NC} mbake validation failed"
-        ((ERRORS++))
+        ((ERRORS+=1))
     fi
 }
 
@@ -245,7 +266,7 @@ mbake_format_check() {
         echo ""
         echo "Run 'mbake format $file' to fix formatting issues"
         echo "Or run 'mbake format --diff $file' to preview changes"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
     else
         # Unknown case - show as info, don't warn
         echo -e "${GREEN}✓${NC} Formatting is consistent"
@@ -270,7 +291,7 @@ custom_checks() {
         echo "   GNU Make recommends this to delete targets on recipe failure"
         echo "   Add '.DELETE_ON_ERROR:' at the top of your Makefile"
         echo "   See: https://www.gnu.org/software/make/manual/html_node/Special-Targets.html"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         found_issues=1
     fi
 
@@ -281,7 +302,7 @@ custom_checks() {
         echo -e "${BLUE}ℹ${NC} No explicit SHELL setting"
         echo "   Consider 'SHELL := bash' for predictable behavior"
         echo "   See: https://tech.davis-hansson.com/p/make/"
-        ((INFO++))
+        ((INFO+=1))
         found_issues=1
     fi
 
@@ -291,13 +312,13 @@ custom_checks() {
     if ! grep -q "MAKEFLAGS.*--warn-undefined-variables" "$file"; then
         echo -e "${BLUE}ℹ${NC} Consider 'MAKEFLAGS += --warn-undefined-variables'"
         echo "   This alerts you to undefined Make variable references"
-        ((INFO++))
+        ((INFO+=1))
         found_issues=1
     fi
     if ! grep -q "MAKEFLAGS.*--no-builtin-rules" "$file"; then
         echo -e "${BLUE}ℹ${NC} Consider 'MAKEFLAGS += --no-builtin-rules'"
         echo "   This disables built-in implicit rules for faster builds"
-        ((INFO++))
+        ((INFO+=1))
         found_issues=1
     fi
 
@@ -306,7 +327,7 @@ custom_checks() {
         echo -e "${YELLOW}⚠${NC} No .PHONY declarations found"
         echo "   Consider adding .PHONY for targets that don't create files"
         echo "   Example: .PHONY: clean test install"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         found_issues=1
     fi
 
@@ -318,7 +339,7 @@ custom_checks() {
         echo -e "${RED}✗${NC} Potential spaces instead of tabs in recipes detected:"
         echo "$space_lines"
         echo "   Makefiles require TAB characters for recipe indentation"
-        ((ERRORS++))
+        ((ERRORS+=1))
         found_issues=1
     fi
 
@@ -330,7 +351,7 @@ custom_checks() {
         echo -e "${RED}✗${NC} Potential hardcoded credentials detected:"
         echo "$cred_lines"
         echo "   Use environment variables or secret management instead"
-        ((ERRORS++))
+        ((ERRORS+=1))
         found_issues=1
     fi
 
@@ -355,7 +376,7 @@ custom_checks() {
         echo -e "${YELLOW}⚠${NC} Variables without defaults used in dangerous commands:"
         echo -e "$unsafe_vars" | head -3
         echo "   Consider adding default values (VAR := value) or validation"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         found_issues=1
     fi
 
@@ -363,7 +384,7 @@ custom_checks() {
     if grep -E "^\t[^@#-]" "$file" | grep -vE "set -e|pipefail|\|\||&&" | grep -q .; then
         echo -e "${BLUE}ℹ${NC} Some recipe commands may lack error handling"
         echo "   Consider using 'set -e', '||', '&&' or '-' prefix for error control"
-        ((INFO++))
+        ((INFO+=1))
         found_issues=1
     fi
 
@@ -372,7 +393,7 @@ custom_checks() {
         if ! grep -qE "^\.(INTERMEDIATE|SECONDARY):" "$file"; then
             echo -e "${BLUE}ℹ${NC} Intermediate files detected (.o, .tmp, .temp)"
             echo "   Consider using .INTERMEDIATE or .SECONDARY for automatic cleanup"
-            ((INFO++))
+            ((INFO+=1))
             found_issues=1
         fi
     fi
@@ -384,7 +405,7 @@ custom_checks() {
         if ! grep -B1 "^all:" "$file" | grep -qE "^##"; then
             echo -e "${BLUE}ℹ${NC} No documentation for default target"
             echo "   Consider adding a comment explaining the default target"
-            ((INFO++))
+            ((INFO+=1))
             found_issues=1
         fi
     fi
@@ -398,7 +419,7 @@ custom_checks() {
         echo -e "${YELLOW}⚠${NC} Shell commands with recursive expansion '=' found:"
         echo "$shell_lines"
         echo "   Use ':=' for immediate expansion to avoid repeated shell calls"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         found_issues=1
     fi
 
@@ -408,7 +429,7 @@ custom_checks() {
         if ! grep -q "^\.SUFFIXES:" "$file"; then
             echo -e "${BLUE}ℹ${NC} Pattern/suffix rules found but no .SUFFIXES declaration"
             echo "   Consider adding '.SUFFIXES:' to disable built-in rules for faster builds"
-            ((INFO++))
+            ((INFO+=1))
             found_issues=1
         fi
     fi
@@ -422,7 +443,7 @@ custom_checks() {
         echo -e "${YELLOW}⚠${NC} Direct 'make' call in recipe (should use \$(MAKE)):"
         echo "$make_lines"
         echo "   Use '\$(MAKE)' for recursive make calls to preserve flags and options"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         found_issues=1
     fi
 
@@ -432,7 +453,7 @@ custom_checks() {
     if [ "$target_count" -gt 10 ] && ! grep -q "^\.SUFFIXES:" "$file"; then
         echo -e "${BLUE}ℹ${NC} Large Makefile ($target_count targets) without .SUFFIXES"
         echo "   Consider adding '.SUFFIXES:' to disable built-in rules for faster builds"
-        ((INFO++))
+        ((INFO+=1))
         found_issues=1
     fi
 
@@ -476,14 +497,14 @@ custom_checks() {
                 echo "   With .ONESHELL, recipe errors (except the last line) are silently ignored"
                 echo "   Fix: Add '.SHELLFLAGS := -eu -o pipefail -c'"
                 echo "   See: https://www.gnu.org/software/make/manual/html_node/One-Shell.html"
-                ((WARNINGS++))
+                ((WARNINGS+=1))
                 found_issues=1
             fi
         elif [ "$has_e_flag" -eq 0 ]; then
             echo -e "${YELLOW}⚠${NC} .ONESHELL with SHELLFLAGS missing -e flag"
             echo "   Without -e, errors in recipe commands are ignored"
             echo "   Consider: .SHELLFLAGS := -eu -o pipefail -c"
-            ((WARNINGS++))
+            ((WARNINGS+=1))
             found_issues=1
         else
             # Has -e, but recommend full flags as info
@@ -491,7 +512,7 @@ custom_checks() {
                 echo -e "${BLUE}ℹ${NC} .SHELLFLAGS could include additional safety flags"
                 echo "   Recommended: .SHELLFLAGS := -eu -o pipefail -c"
                 echo "   -u: error on undefined variables, -o pipefail: catch pipe failures"
-                ((INFO++))
+                ((INFO+=1))
                 found_issues=1
             fi
         fi
@@ -504,7 +525,7 @@ custom_checks() {
         echo -e "${YELLOW}⚠${NC} .EXPORT_ALL_VARIABLES used - security consideration"
         echo "   This exports ALL Make variables to subprocesses, potentially leaking sensitive data"
         echo "   Consider using 'export VAR' for specific variables instead"
-        ((WARNINGS++))
+        ((WARNINGS+=1))
         found_issues=1
     fi
 
@@ -518,7 +539,7 @@ custom_checks() {
             echo "   Consider using order-only prerequisites for directories:"
             echo "   Example: \$(BUILD_DIR)/app: \$(SOURCES) | \$(BUILD_DIR)"
             echo "   This prevents unnecessary rebuilds when only timestamps change"
-            ((INFO++))
+            ((INFO+=1))
             found_issues=1
         fi
     fi
@@ -531,7 +552,7 @@ custom_checks() {
             echo -e "${BLUE}ℹ${NC} Parallel-sensitive commands detected (npm/docker/pip install)"
             echo "   Consider using .NOTPARALLEL for targets with these commands"
             echo "   Or add proper dependencies to prevent race conditions"
-            ((INFO++))
+            ((INFO+=1))
             found_issues=1
         fi
     fi
@@ -642,7 +663,7 @@ main() {
     check_dependencies
     validate_file "$makefile"
 
-    # Set up mbake venv only when python3+pip3 are present (MBAKE_AVAILABLE=1 after check_dependencies)
+    # Set up mbake venv only when python3+pip3 are present and skip mode is disabled.
     if [ "$MBAKE_AVAILABLE" -eq 1 ]; then
         setup_venv || true
     fi
@@ -656,9 +677,17 @@ main() {
         mbake_format_check "$makefile" || true
     else
         print_subheader "MBAKE VALIDATION"
-        echo -e "${BLUE}ℹ${NC} Skipped — mbake not available (python3, pip3, and network required)"
+        if [ "$MBAKE_SKIP_INSTALL_MODE" -eq 1 ]; then
+            echo -e "${BLUE}ℹ${NC} Skipped — MBAKE_SKIP_INSTALL=1 (deterministic mode)"
+        else
+            echo -e "${BLUE}ℹ${NC} Skipped — mbake not available (python3, pip3, and network required)"
+        fi
         print_subheader "MBAKE FORMAT CHECK"
-        echo -e "${BLUE}ℹ${NC} Skipped — mbake not available (python3, pip3, and network required)"
+        if [ "$MBAKE_SKIP_INSTALL_MODE" -eq 1 ]; then
+            echo -e "${BLUE}ℹ${NC} Skipped — MBAKE_SKIP_INSTALL=1 (deterministic mode)"
+        else
+            echo -e "${BLUE}ℹ${NC} Skipped — mbake not available (python3, pip3, and network required)"
+        fi
         ((INFO+=2))
     fi
 

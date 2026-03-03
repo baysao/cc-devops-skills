@@ -24,6 +24,9 @@ This chart exists to exercise and demonstrate the **mandatory Stage 9 Security B
 ```bash
 # From the helm-validator skill directory:
 
+# Automated regression check (recommended)
+bash test/test_stage9_workload.sh
+
 # Stage 2: Structure check
 bash scripts/validate_chart_structure.sh test/test-workload-chart
 
@@ -60,6 +63,11 @@ find /tmp/workload-rendered -type f \( -name "*.yaml" -o -name "*.yml" \) \
 find /tmp/workload-rendered -type f \( -name "*.yaml" -o -name "*.yml" \) \
   -exec grep "image:.*:latest" {} +
 # Expected: matches nginx:latest in deployment.yaml
+
+# Optional profile check: override tag and verify :latest is removed
+helm template test-release test/test-workload-chart \
+  -f test/test-workload-chart/values-pinned-tag.yaml \
+  --output-dir /tmp/workload-rendered-pinned
 ```
 
 ## Expected Stage 9 Report

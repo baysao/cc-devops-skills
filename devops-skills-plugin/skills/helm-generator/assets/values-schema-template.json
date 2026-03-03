@@ -589,7 +589,10 @@
         },
         "data": {
           "description": "Key-value pairs to populate the ConfigMap",
-          "type": "object"
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },
@@ -607,7 +610,10 @@
         },
         "stringData": {
           "description": "Plain-text key-value pairs stored as Secret stringData",
-          "type": "object"
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     }

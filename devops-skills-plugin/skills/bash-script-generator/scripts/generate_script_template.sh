@@ -28,6 +28,23 @@ default_output_file() {
     echo "./${template_type}-script.sh"
 }
 
+validate_template_type() {
+    local value="$1"
+
+    # Block traversal payloads and path separators explicitly.
+    if [[ "$value" == *"/"* || "$value" == *".."* ]]; then
+        echo "Error: Invalid TEMPLATE_TYPE: ${value}" >&2
+        echo "Allowed characters: letters, digits, '_' and '-'" >&2
+        return 1
+    fi
+
+    if [[ ! "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Error: Invalid TEMPLATE_TYPE: ${value}" >&2
+        echo "Allowed characters: letters, digits, '_' and '-'" >&2
+        return 1
+    fi
+}
+
 usage() {
     cat << EOF
 Usage: ${0##*/} TEMPLATE_TYPE [OUTPUT_FILE]
@@ -77,6 +94,7 @@ main() {
     fi
 
     template_type="$1"
+    validate_template_type "$template_type" || exit 1
     output_file="${2:-$(default_output_file "${template_type}")}"
     template_file="${TEMPLATES_DIR}/${template_type}-template.sh"
 

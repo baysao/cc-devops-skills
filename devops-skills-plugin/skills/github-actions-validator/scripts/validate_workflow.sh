@@ -201,6 +201,122 @@ check_action_versions() {
     return $has_issues
 }
 
+# Advisory security hardening checks.
+# These checks emit warnings and do not change overall pass/fail status.
+check_security_policies() {
+    local workflow_path=$1
+    log_section "Security Policy Checks (Advisory)"
+
+    local files_to_check=()
+    if [ -f "$workflow_path" ]; then
+        files_to_check+=("$workflow_path")
+    elif [ -d "$workflow_path" ]; then
+        while IFS= read -r -d '' file; do
+            files_to_check+=("$file")
+        done < <(find "$workflow_path" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) -print0 2>/dev/null)
+    else
+        log_error "Path not found: $workflow_path"
+        return 1
+    fi
+
+    if [ ${#files_to_check[@]} -eq 0 ]; then
+        log_warn "No workflow files found for security checks"
+        return 0
+    fi
+
+    local warning_count=0
+
+    for file in "${files_to_check[@]}"; do
+        log_info "Checking policies in: $file"
+
+        # 1) Third-party actions should be pinned to full SHA.
+        while IFS= read -r match; do
+            local line_no="${match%%:*}"
+            local line="${match#*:}"
+            if [[ "$line" =~ uses:[[:space:]]*([^@[:space:]]+)@([^[:space:]#]+) ]]; then
+                local action="${BASH_REMATCH[1]}"
+                local version="${BASH_REMATCH[2]}"
+                action=$(echo "$action" | tr -d '"' | tr -d "'" | xargs)
+                version=$(echo "$version" | tr -d '"' | tr -d "'" | sed 's/[[:space:],]*$//')
+
+                # Skip local actions/reusable workflows and docker:// references.
+                if [[ "$action" == ./* ]] || [[ "$action" == ../* ]] || [[ "$action" == docker://* ]]; then
+                    continue
+                fi
+
+                # Only enforce SHA pinning for third-party actions.
+                if [[ "$action" == */* ]]; then
+                    local owner="${action%%/*}"
+                    if [ "$owner" != "actions" ] && [ "$owner" != "github" ]; then
+                        if ! [[ "$version" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                            log_warn "$file:$line_no third-party action is not SHA pinned: ${action}@${version}"
+                            ((warning_count++))
+                        fi
+                    fi
+                fi
+            fi
+        done < <(grep -nE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*[^[:space:]]+@[^[:space:]#]+' "$file" || true)
+
+        # 2) Explicit least-privilege permissions.
+        if ! grep -qE '^[[:space:]]*permissions:[[:space:]]*' "$file"; then
+            log_warn "$file missing explicit permissions block. Add workflow/job-level permissions (or permissions: {})."
+            ((warning_count++))
+        fi
+        if grep -qE '^[[:space:]]*permissions:[[:space:]]*write-all([[:space:]]*(#.*)?)?$' "$file"; then
+            log_warn "$file uses permissions: write-all. Prefer least-privilege scopes."
+            ((warning_count++))
+        fi
+
+        # 3) Heuristic detection for untrusted github context in run scripts.
+        while IFS= read -r risky_line; do
+            log_warn "$file:$risky_line potential script injection risk in run step. Move untrusted input to env and quote it."
+            ((warning_count++))
+        done < <(
+            awk '
+                function indent_of(s, t) { t=s; sub(/^[ ]*/, "", t); return length(s)-length(t) }
+                BEGIN { in_run_block=0; run_indent=-1 }
+                {
+                    line=$0
+                    indent=indent_of(line)
+                    if (in_run_block && indent <= run_indent && line !~ /^[[:space:]]*$/) {
+                        in_run_block=0
+                    }
+                    if (line ~ /^[[:space:]]*run:[[:space:]]*[|>][[:space:]]*$/) {
+                        in_run_block=1
+                        run_indent=indent
+                        next
+                    }
+                    if (line ~ /^[[:space:]]*run:[[:space:]]*.*\$\{\{[[:space:]]*github\.(event|head_ref|ref_name|actor|triggering_actor|repository_owner|base_ref)/) {
+                        print NR
+                        next
+                    }
+                    if (in_run_block && line ~ /\$\{\{[[:space:]]*github\.(event|head_ref|ref_name|actor|triggering_actor|repository_owner|base_ref)/) {
+                        print NR
+                    }
+                }
+            ' "$file"
+        )
+
+        # 4) OIDC-integrated actions should explicitly request id-token: write.
+        if grep -qiE 'uses:[[:space:]]*(aws-actions/configure-aws-credentials|azure/login|google-github-actions/auth|hashicorp/vault-action|actions/attest-build-provenance)@' "$file"; then
+            if ! grep -qiE 'id-token:[[:space:]]*write' "$file"; then
+                log_warn "$file uses an OIDC-related action but does not declare id-token: write in permissions."
+                ((warning_count++))
+            fi
+        fi
+    done
+
+    echo ""
+    if [ $warning_count -eq 0 ]; then
+        log_info "✓ No security policy warnings found"
+    else
+        log_warn "Security policy warnings: $warning_count (advisory only; exit code unchanged)"
+        log_info "See references/common_errors.md (Security section) and references/modern_features.md"
+    fi
+
+    return 0
+}
+
 # Show reference file hints based on error type
 show_reference_hints() {
     local error_output=$1
@@ -375,6 +491,7 @@ validate_with_actionlint() {
 test_with_act() {
     local workflow_path=$1
     log_section "Running act (validation)"
+    ACT_SKIP_REASON=""
 
     # Check if Docker is running
     if ! check_docker; then
@@ -432,7 +549,8 @@ test_with_act() {
         log_warn "No .github/workflows directory found in path hierarchy"
         log_warn "Skipping act validation - workflows must be in .github/workflows/ directory"
         log_info "Searched from: $workflow_path"
-        return 0
+        ACT_SKIP_REASON="no .github/workflows directory found in path hierarchy"
+        return 2
     fi
 
     log_info "Repository root: $repo_root"
@@ -455,7 +573,8 @@ test_with_act() {
             log_warn "act can only validate workflows in .github/workflows/ directory"
             log_info "Skipping act validation for this file"
             log_info "Note: actionlint validation still applies to this file"
-            return 0
+            ACT_SKIP_REASON="target file is outside .github/workflows"
+            return 2
         fi
     elif [ -d "$abs_workflow_path" ]; then
         # Directory specified
@@ -468,7 +587,8 @@ test_with_act() {
             log_warn "Target directory is outside .github/workflows/: $abs_workflow_path"
             log_warn "act can only validate workflows in .github/workflows/ directory"
             log_info "Skipping act validation for this directory"
-            return 0
+            ACT_SKIP_REASON="target directory is outside .github/workflows"
+            return 2
         fi
     fi
 
@@ -582,6 +702,7 @@ usage() {
     echo "  --lint-only       Run only actionlint validation"
     echo "  --test-only       Run only act testing (requires Docker)"
     echo "  --check-versions  Check action versions against recommended versions"
+    echo "  --policy-checks   Run advisory security policy checks (warnings only)"
     echo "  --help            Display this help message"
     echo ""
     echo "Examples:"
@@ -590,6 +711,7 @@ usage() {
     echo "  $0 --lint-only .github/workflows/ci.yml"
     echo "  $0 --test-only .github/workflows/"
     echo "  $0 --check-versions .github/workflows/ci.yml"
+    echo "  $0 --lint-only --policy-checks .github/workflows/ci.yml"
     echo ""
     echo "Requirements:"
     echo "  - actionlint: For static analysis (installed via install_tools.sh)"
@@ -605,13 +727,19 @@ main() {
     local lint_only=false
     local test_only=false
     local check_versions=false
+    local policy_checks=false
     local version_only=false
     local run_actionlint=true
     local run_act=true
     local allow_tool_fallback=false
     local docker_available=true
+    local did_actionlint=false
+    local did_act=false
+    local act_skip_reason=""
+    local act_result=0
     CHECK_TOOLS_RUN_ACTIONLINT=true
     CHECK_TOOLS_RUN_ACT=true
+    ACT_SKIP_REASON=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -626,6 +754,10 @@ main() {
                 ;;
             --check-versions)
                 check_versions=true
+                shift
+                ;;
+            --policy-checks)
+                policy_checks=true
                 shift
                 ;;
             --help)
@@ -662,7 +794,7 @@ main() {
         allow_tool_fallback=true
     fi
 
-    if [ "$check_versions" = true ] && [ "$lint_only" = false ] && [ "$test_only" = false ]; then
+    if [ "$check_versions" = true ] && [ "$lint_only" = false ] && [ "$test_only" = false ] && [ "$policy_checks" = false ]; then
         version_only=true
         run_actionlint=false
         run_act=false
@@ -712,21 +844,49 @@ main() {
     # Run actionlint (output is captured and printed inside validate_with_actionlint,
     # and stored in ACTIONLINT_OUTPUT for reference hint routing)
     if [ "$run_actionlint" = true ]; then
+        did_actionlint=true
         if ! validate_with_actionlint "$workflow_path"; then
+            exit_code=1
+        fi
+    fi
+
+    # Run advisory security checks if requested.
+    if [ "$policy_checks" = true ]; then
+        if ! check_security_policies "$workflow_path"; then
             exit_code=1
         fi
     fi
 
     # Run act if enabled and Docker is available
     if [ "$run_act" = true ] && [ "$docker_available" = true ]; then
-        if ! test_with_act "$workflow_path"; then
+        test_with_act "$workflow_path"
+        act_result=$?
+        if [ $act_result -eq 0 ]; then
+            did_act=true
+        elif [ $act_result -eq 2 ]; then
+            act_skip_reason="$ACT_SKIP_REASON"
+            log_warn "act validation skipped: $act_skip_reason"
+            if [ "$did_actionlint" = false ]; then
+                log_error "No effective validator executed: act was skipped and actionlint did not run"
+                exit_code=1
+            fi
+        else
             exit_code=1
         fi
     fi
 
+    if [ "$version_only" = false ] && [ "$did_actionlint" = false ] && [ "$did_act" = false ]; then
+        log_error "No validator executed; refusing to report success"
+        exit_code=1
+    fi
+
     log_section "Validation Summary"
     if [ $exit_code -eq 0 ]; then
-        log_info "✓ All validations passed"
+        if [ -n "$act_skip_reason" ]; then
+            log_info "✓ Validation passed (actionlint completed; act skipped: $act_skip_reason)"
+        else
+            log_info "✓ All validations passed"
+        fi
     else
         log_error "✗ Some validations failed"
 
@@ -740,6 +900,7 @@ main() {
         log_info "  - Review error messages above"
         log_info "  - Use --lint-only to skip Docker-dependent tests"
         log_info "  - Use --check-versions to check for outdated actions"
+        log_info "  - Use --policy-checks for security hardening warnings"
         log_info "  - Check references/common_errors.md for solutions"
     fi
 

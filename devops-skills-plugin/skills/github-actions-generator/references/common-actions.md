@@ -575,7 +575,8 @@ permissions:
 
 ### actions/dependency-review-action
 
-**Latest Version:** v4
+**Latest Version:** v4 (v4.8.3)
+**SHA:** `05fe4576374b728f0c523d6a13d64c25081e0803`
 **Description:** Scans pull requests for vulnerable dependency versions
 
 **Required Permissions:**
@@ -592,7 +593,7 @@ permissions:
 **Example:**
 ```yaml
 - name: Dependency Review
-  uses: actions/dependency-review-action@v4
+  uses: actions/dependency-review-action@05fe4576374b728f0c523d6a13d64c25081e0803 # v4.8.3
   with:
     fail-on-severity: critical
     allow-licenses: MIT, Apache-2.0, BSD-3-Clause
@@ -600,7 +601,8 @@ permissions:
 
 ### actions/attest-sbom
 
-**Latest Version:** v2
+**Latest Version:** v2 (v2.4.0)
+**SHA:** `bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b`
 **Description:** Generate SBOM attestations for artifacts
 
 **Required Permissions:**
@@ -615,12 +617,64 @@ permissions:
 **Example:**
 ```yaml
 - name: Generate SBOM attestation
-  uses: actions/attest-sbom@v2
+  uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
   with:
     subject-name: ${{ env.REGISTRY }}/myapp
     subject-digest: sha256:${{ steps.build.outputs.digest }}
     sbom-path: sbom.json
     push-to-registry: true
+```
+
+### actions/attest-build-provenance
+
+**Latest Version:** v2 (v2.4.0)
+**SHA:** `e8998f949152b193b063cb0ec769d69d929409be`
+**Description:** Generate build provenance attestations for build artifacts
+
+**Required Permissions:**
+```yaml
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+  packages: write  # For container registry
+```
+
+**Example:**
+```yaml
+- name: Generate provenance attestation
+  uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+  with:
+    subject-name: ${{ env.REGISTRY }}/myapp
+    subject-digest: sha256:${{ steps.build.outputs.digest }}
+    push-to-registry: true
+```
+
+### github/codeql-action
+
+**Latest Version:** v3 (v3.32.5)
+**SHA:** `ae9ef3a1d2e3413523c3741725c30064970cc0d4`
+**Description:** GitHub CodeQL scanning actions (`init`, `analyze`, `upload-sarif`)
+
+**Required Permissions:**
+```yaml
+permissions:
+  contents: read
+  security-events: write
+```
+
+**Example:**
+```yaml
+- name: Initialize CodeQL
+  uses: github/codeql-action/init@ae9ef3a1d2e3413523c3741725c30064970cc0d4 # v3.32.5
+  with:
+    languages: javascript
+
+- name: Upload SARIF
+  if: always()
+  uses: github/codeql-action/upload-sarif@ae9ef3a1d2e3413523c3741725c30064970cc0d4 # v3.32.5
+  with:
+    sarif_file: trivy-results.sarif
 ```
 
 ## Best Practices Summary (Updated November 2025)

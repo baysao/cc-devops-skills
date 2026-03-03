@@ -3,7 +3,7 @@ FROM [BASE_IMAGE]:[TAG]
 
 # Install required tools with minimal packages, then clean package caches
 RUN [PACKAGE_MANAGER] update && \
-    [PACKAGE_MANAGER] install -y --no-install-recommends \
+    [PACKAGE_MANAGER] install [PACKAGE_INSTALL_FLAGS] \
     [PACKAGE_1] \
     [PACKAGE_2] \
     && [CLEANUP_COMMAND]

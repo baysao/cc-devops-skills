@@ -9,6 +9,8 @@ Or directly from the scripts/ directory:
     python3 test_validators.py
 """
 
+import json
+import subprocess
 import sys
 import os
 import unittest
@@ -31,6 +33,18 @@ def syntax(query):
 
 def best(query):
     return PromQLBestPracticesChecker(query).check()
+
+
+def best_cli(query):
+    """Run check_best_practices.py as a CLI and return (process, parsed_json)."""
+    checker = os.path.join(_SCRIPT_DIR, 'check_best_practices.py')
+    proc = subprocess.run(
+        [sys.executable, checker, query],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc, json.loads(proc.stdout)
 
 
 def error_types(result):
@@ -438,6 +452,44 @@ class TestVectorMatching(unittest.TestCase):
     def test_group_left_without_on_flagged(self):
         q = 'metric_a * group_left() metric_b'
         self.assertIn('group_without_matching', issue_types(best(q)))
+
+
+class TestHighCardinalityAggregationLabels(unittest.TestCase):
+
+    def test_by_with_user_id_flagged(self):
+        q = 'sum by (user_id) (rate(http_requests_total[5m]))'
+        self.assertIn('high_cardinality_aggregation_label', issue_types(best(q)))
+
+    def test_without_with_user_id_not_flagged(self):
+        q = 'sum without (user_id) (rate(http_requests_total[5m]))'
+        self.assertNotIn('high_cardinality_aggregation_label', issue_types(best(q)))
+
+    def test_mixed_by_and_without_only_by_triggers_warning(self):
+        q = ('sum without (user_id) (rate(http_requests_total[5m])) + '
+             'sum by (session_id) (rate(http_requests_total[5m]))')
+        self.assertIn('high_cardinality_aggregation_label', issue_types(best(q)))
+
+    def test_nested_without_and_safe_by_not_flagged(self):
+        q = 'sum by (job) (sum without (user_id) (rate(http_requests_total[5m])))'
+        self.assertNotIn('high_cardinality_aggregation_label', issue_types(best(q)))
+
+
+class TestBestPracticesCliIntegration(unittest.TestCase):
+    """CLI-level regression checks for emitted issue IDs."""
+
+    def test_cli_emits_aggregation_label_issue_id_for_by_clause(self):
+        query = 'sum by (user_id) (rate(http_requests_total[5m]))'
+        proc, result = best_cli(query)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('high_cardinality_aggregation_label', issue_types(result))
+
+    def test_cli_does_not_emit_aggregation_label_issue_id_for_without_clause(self):
+        query = 'sum without (user_id) (rate(http_requests_total[5m]))'
+        proc, result = best_cli(query)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn('high_cardinality_aggregation_label', issue_types(result))
 
 
 if __name__ == '__main__':

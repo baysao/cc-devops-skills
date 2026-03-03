@@ -3,8 +3,16 @@
 # Tasks: Main task list
 # Required variables: none (all have defaults)
 
-- name: Include OS-specific variables
-  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+- name: Include OS-specific variables with fallback
+  ansible.builtin.include_vars: "{{ lookup('ansible.builtin.first_found', params) }}"
+  vars:
+    params:
+      files:
+        - "{{ ansible_distribution }}.yml"
+        - "{{ ansible_os_family }}.yml"
+        - default.yml
+      paths:
+        - vars
   tags:
     - always
 

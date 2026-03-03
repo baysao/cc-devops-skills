@@ -233,7 +233,9 @@ class TerraformParser:
           registry      - namespace/module/provider (no dots in first segment)
           unknown       - anything else
         """
-        if source.startswith('./') or source.startswith('../'):
+        source = source.strip()
+
+        if source.startswith('./') or source.startswith('../') or source.startswith('/'):
             return 'local'
         if source.startswith('git::') or source.startswith('git@'):
             return 'git'
@@ -243,15 +245,31 @@ class TerraformParser:
             return 'cloud_storage'
         if source.startswith('https://') or source.startswith('http://'):
             return 'http'
-        if '/' in source:
-            # Registry format is namespace/module/provider — the first segment
-            # is a plain namespace with no dots (e.g. "hashicorp").
-            # Domain-based Git shorthands (github.com/org/repo,
-            # bitbucket.org/org/repo) have a dot in the first segment.
-            first_segment = source.split('/')[0]
-            if '.' in first_segment:
+
+        # Strip query and submodule selectors for source shape analysis.
+        base_source = source.split('?', 1)[0].split('//', 1)[0]
+        if not base_source:
+            return 'unknown'
+
+        if '.git' in base_source:
+            return 'git'
+
+        segments = [segment for segment in base_source.split('/') if segment]
+        if len(segments) == 3:
+            first_segment = segments[0].lower()
+            if first_segment in {'github.com', 'bitbucket.org', 'gitlab.com'}:
                 return 'git'
             return 'registry'
+
+        if len(segments) == 4 and '.' in segments[0]:
+            # Private/remote registry source format:
+            # <hostname>/<namespace>/<name>/<provider>
+            return 'registry'
+
+        if len(segments) >= 3 and '.' in segments[0]:
+            # Domain-based shorthand VCS source (e.g. github.com/org/repo).
+            return 'git'
+
         return 'unknown'
 
     def _extract_resources(self, parsed: dict, filepath: str) -> None:

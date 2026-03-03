@@ -224,14 +224,46 @@ count_instruction() {
     '
 }
 
-final_from_image() {
+from_images() {
     local content="$1"
 
     printf '%s\n' "$content" | awk '
         BEGIN { IGNORECASE=1 }
-        /^[[:space:]]*FROM[[:space:]]+/ { image=$2 }
-        END { print image }
+        function parse_from_image(line, n, token, i) {
+            sub(/^[[:space:]]*FROM[[:space:]]+/, "", line)
+            sub(/[[:space:]]+#.*/, "", line)
+            n = split(line, token, /[[:space:]]+/)
+
+            i = 1
+            while (i <= n && token[i] ~ /^--/) {
+                # Handle both --platform=<value> and --platform <value> forms.
+                if (token[i] == "--platform" && i < n) {
+                    i += 2
+                    continue
+                }
+                i++
+            }
+
+            if (i <= n) {
+                return token[i]
+            }
+
+            return ""
+        }
+
+        /^[[:space:]]*FROM[[:space:]]+/ {
+            image = parse_from_image($0)
+            if (image != "") {
+                print image
+            }
+        }
     '
+}
+
+final_from_image() {
+    local content="$1"
+
+    from_images "$content" | tail -n1
 }
 
 is_nonroot_base_image() {
@@ -432,7 +464,7 @@ run_best_practices() {
 
             # Flag if a package install follows COPY . within the same stage
             if (stage_copy_line > 0 && NR > stage_copy_line && lower ~ /^[[:space:]]*run[[:space:]]+/) {
-                if (lower ~ /pip[[:space:]]+install|npm[[:space:]]+install|npm[[:space:]]+ci|yarn[[:space:]]|go[[:space:]]+mod[[:space:]]|apt-get[[:space:]]+install|apk[[:space:]]+add/) {
+                if (lower ~ /pip[[:space:]]+install|npm[[:space:]]+(install|ci)|yarn([[:space:]]|$)|go[[:space:]]+mod[[:space:]]|apt-get[[:space:]]+install|apk[[:space:]]+add/) {
                     found = 1
                     exit
                 }
@@ -478,10 +510,7 @@ run_optimization() {
     normalized_content=$(normalize_dockerfile "$DOCKERFILE")
 
     # Analyze base images
-    BASE_IMAGES=$(printf '%s\n' "$normalized_content" | awk '
-        BEGIN { IGNORECASE=1 }
-        /^[[:space:]]*FROM[[:space:]]+/ { print $2 }
-    ')
+    BASE_IMAGES=$(from_images "$normalized_content")
 
     echo -e "${BLUE}Base Image Analysis:${NC}"
     for image in $BASE_IMAGES; do

@@ -78,21 +78,25 @@ class SecurityScanner:
         (re.compile(r'--insecure|-k\s'), 'insecure-ssl', 'Do not disable SSL/TLS verification'),
     ]
 
-    # Pattern for secret variable references: $VAR or ${VAR} where VAR contains
-    # a sensitive keyword (as a suffix or standalone).  The keyword list intentionally
-    # omits the bare word KEY to avoid flagging unrelated vars like $CACHE_KEY or
-    # $KEY_FILE; SECRET_KEY and API_KEY are still caught via SECRET/API_KEY terms.
-    _SECRET_VAR = (
-        r'\$\{?[A-Za-z0-9_]*'
-        r'(?:PASSWORD|PASSWD|PWD|SECRET|TOKEN|CREDENTIAL|API_KEY|APIKEY)'
-        r'[A-Za-z0-9_]*\}?'
+    # Sensitive variable hints for secret exposure checks. Keep this specific to
+    # high-risk key families to avoid broad KEY false positives.
+    SECRET_VAR_HINTS = (
+        'PASSWORD', 'PASSWD', 'PWD', 'SECRET', 'TOKEN', 'CREDENTIAL',
+        'API_KEY', 'APIKEY', 'PRIVATE_KEY', 'SSH_PRIVATE_KEY',
+        'SSH_KEY', 'GPG_KEY', 'SIGNING_KEY', 'ACCESS_KEY', 'SECRET_KEY'
     )
+
+    # Common non-secret variables that include "KEY" in their names.
+    NON_SECRET_KEY_EXCEPTIONS = {'CACHE_KEY', 'KEY_FILE', 'PUBLIC_KEY'}
+
+    # Capture variable references like $VAR or ${VAR}.
+    VAR_REF_PATTERN = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?')
 
     # Patterns that might leak secrets in logs
     ECHO_SECRET_PATTERNS = [
-        re.compile(r'echo\s+.*' + _SECRET_VAR, re.IGNORECASE),
-        re.compile(r'print\b.*' + _SECRET_VAR, re.IGNORECASE),
-        re.compile(r'console\.log\b.*' + _SECRET_VAR, re.IGNORECASE),
+        re.compile(r'\becho\b', re.IGNORECASE),
+        re.compile(r'\bprint\b', re.IGNORECASE),
+        re.compile(r'console\.log\b', re.IGNORECASE),
     ]
 
     def __init__(self, file_path: str):
@@ -244,6 +248,14 @@ class SecurityScanner:
                                 remediation
                             ))
 
+    @classmethod
+    def _looks_sensitive_var(cls, var_name: str) -> bool:
+        """Return True when a variable name suggests sensitive data."""
+        normalized = var_name.upper()
+        if normalized in cls.NON_SECRET_KEY_EXCEPTIONS:
+            return False
+        return any(hint in normalized for hint in cls.SECRET_VAR_HINTS)
+
     def _check_secret_exposure(self):
         """Check for potential secret exposure in logs"""
 
@@ -265,15 +277,20 @@ class SecurityScanner:
                 for cmd in script:
                     cmd_str = str(cmd)
 
-                    for pattern in self.ECHO_SECRET_PATTERNS:
-                        if pattern.search(cmd_str):
-                            self.issues.append(SecurityIssue(
-                                'high',
-                                line,
-                                f"Job '{job_name}' may expose secrets in logs",
-                                'secret-in-logs',
-                                "Avoid printing secret variables; ensure they are masked in CI/CD settings"
-                            ))
+                    if not any(pattern.search(cmd_str) for pattern in self.ECHO_SECRET_PATTERNS):
+                        continue
+
+                    for var_name in self.VAR_REF_PATTERN.findall(cmd_str):
+                        if not self._looks_sensitive_var(var_name):
+                            continue
+                        self.issues.append(SecurityIssue(
+                            'high',
+                            line,
+                            f"Job '{job_name}' may expose secrets in logs",
+                            'secret-in-logs',
+                            "Avoid printing secret variables; ensure they are masked in CI/CD settings"
+                        ))
+                        break
 
             # Check for debug flags that might expose secrets
             if 'variables' in job:
@@ -298,35 +315,35 @@ class SecurityScanner:
                 else:
                     return
 
-            # Images pinned by digest are always safe — skip all tag checks
-            if '@sha256:' in image_value:
-                return
+            is_digest_pinned = '@sha256:' in image_value
 
-            # Check for :latest tag (security risk due to unpredictability)
-            if ':latest' in image_value:
-                self.issues.append(SecurityIssue(
-                    'medium',
-                    line,
-                    f"Using ':latest' tag in {context} is a security risk",
-                    'image-latest-tag',
-                    "Pin to specific version or SHA digest to ensure consistent, verified images"
-                ))
-            elif not image_value.startswith('$'):
-                # Check for image with no tag at all (implicit :latest).
-                # Examine the last path component (after any registry/org prefix)
-                # to distinguish 'registry:5000/image' (port colon) from 'image:1.0' (tag colon).
-                last_component = image_value.rsplit('/', 1)[-1]
-                if ':' not in last_component:
+            # Digest-pinned images skip tag checks, but still go through trust checks.
+            if not is_digest_pinned:
+                # Check for :latest tag (security risk due to unpredictability)
+                if ':latest' in image_value:
                     self.issues.append(SecurityIssue(
                         'medium',
                         line,
-                        f"Image in {context} has no version tag (implicitly uses ':latest')",
-                        'image-no-tag',
-                        "Pin to a specific version tag (e.g., ubuntu:22.04) or SHA digest"
+                        f"Using ':latest' tag in {context} is a security risk",
+                        'image-latest-tag',
+                        "Pin to specific version or SHA digest to ensure consistent, verified images"
                     ))
+                elif not image_value.startswith('$'):
+                    # Check for image with no tag at all (implicit :latest).
+                    # Examine the last path component (after any registry/org prefix)
+                    # to distinguish 'registry:5000/image' (port colon) from 'image:1.0' (tag colon).
+                    last_component = image_value.rsplit('/', 1)[-1]
+                    if ':' not in last_component:
+                        self.issues.append(SecurityIssue(
+                            'medium',
+                            line,
+                            f"Image in {context} has no version tag (implicitly uses ':latest')",
+                            'image-no-tag',
+                            "Pin to a specific version tag (e.g., ubuntu:22.04) or SHA digest"
+                        ))
 
             # Check for variables in image names (potential injection)
-            if '$' in image_value and '@sha256' not in image_value:
+            if '$' in image_value and not is_digest_pinned:
                 self.issues.append(SecurityIssue(
                     'medium',
                     line,

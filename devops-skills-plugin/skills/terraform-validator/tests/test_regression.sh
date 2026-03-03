@@ -101,13 +101,41 @@ if [[ $rc -ne 1 ]]; then
   exit 1
 fi
 
-# 5) Module type classification: github.com/* and bitbucket.org/* must be 'git',
-#    hg:: prefix must be 'mercurial', and a bare registry path must remain 'registry'.
+# 5) install_checkov wrapper generation must preserve runtime INSTALL_SCRIPT_PATH
+#    references in the generated wrapper body.
+WRAPPER_HOME="$TMP_DIR/wrapper-home"
+HOME="$WRAPPER_HOME" bash -c '
+set -euo pipefail
+source "'"$SCRIPTS_DIR/install_checkov.sh"'"
+SCRIPT_PATH="'"$SCRIPTS_DIR/install_checkov.sh"'"
+create_wrapper >/dev/null
+'
+WRAPPER_SCRIPT="$WRAPPER_HOME/.local/bin/checkov"
+if [ ! -f "$WRAPPER_SCRIPT" ]; then
+  echo "FAIL: expected generated wrapper at $WRAPPER_SCRIPT"
+  exit 1
+fi
+if ! rg -q 'if \[ -f "\$INSTALL_SCRIPT_PATH" \]; then' "$WRAPPER_SCRIPT"; then
+  echo "FAIL: wrapper must retain literal INSTALL_SCRIPT_PATH guard"
+  exit 1
+fi
+if ! rg -Fq 'echo "Run: bash \"$INSTALL_SCRIPT_PATH\" install" >&2' "$WRAPPER_SCRIPT"; then
+  echo "FAIL: wrapper must retain literal INSTALL_SCRIPT_PATH install hint"
+  exit 1
+fi
+if rg -q 'if \[ -f "" \]; then' "$WRAPPER_SCRIPT"; then
+  echo "FAIL: wrapper contains empty install path guard"
+  exit 1
+fi
+
+# 6) Module type classification: github.com/* and bitbucket.org/* must be 'git',
+#    hg:: prefix must be 'mercurial', and registry paths must remain 'registry'.
 cat > "$TMP_DIR/modules.tf" <<'TF'
 module "github_mod"   { source = "github.com/hashicorp/example" }
 module "bb_mod"       { source = "bitbucket.org/acme/mymodule" }
 module "hg_mod"       { source = "hg::https://example.com/vpc.hg" }
 module "registry_mod" { source = "hashicorp/consul/aws"  version = "0.1.0" }
+module "private_registry_mod" { source = "app.terraform.io/example/my-module/aws" }
 module "local_mod"    { source = "./modules/vpc" }
 TF
 bash "$SCRIPTS_DIR/extract_tf_info_wrapper.sh" "$TMP_DIR/modules.tf" > "$TMP_DIR/modules.json"
@@ -121,6 +149,7 @@ expected = {
     'bb_mod':       'git',
     'hg_mod':       'mercurial',
     'registry_mod': 'registry',
+    'private_registry_mod': 'registry',
     'local_mod':    'local',
 }
 for name, want in expected.items():
@@ -131,7 +160,7 @@ if errors:
     raise SystemExit('FAIL: wrong module types: ' + '; '.join(errors))
 PY
 
-# 6) Ephemeral resource blocks (Terraform 1.10+) must be extracted and their
+# 7) Ephemeral resource blocks (Terraform 1.10+) must be extracted and their
 #    provider inferred for the docs lookup set.
 cat > "$TMP_DIR/ephemeral.tf" <<'TF'
 terraform {
@@ -165,5 +194,22 @@ implicit = payload.get('implicit_providers', [])
 if not any(p['name'] == 'random' and p['detected_from'] == 'ephemeral' for p in implicit):
     raise SystemExit('FAIL: random not recorded as ephemeral implicit provider')
 PY
+
+# 8) Bytecode artifacts must not be tracked in this skill tree.
+TRACKED_BYTECODE="$(
+  git -C "$SKILL_DIR" ls-files -- . \
+    | rg '^devops-skills-plugin/skills/terraform-validator/.*(__pycache__/|\\.pyc$)' \
+    | while IFS= read -r relpath; do
+        abs_path="$SKILL_DIR/${relpath#devops-skills-plugin/skills/terraform-validator/}"
+        if [ -e "$abs_path" ]; then
+          echo "$relpath"
+        fi
+      done || true
+)"
+if [ -n "$TRACKED_BYTECODE" ]; then
+  echo "FAIL: tracked bytecode artifacts detected:"
+  echo "$TRACKED_BYTECODE"
+  exit 1
+fi
 
 echo "PASS: terraform-validator regression tests"

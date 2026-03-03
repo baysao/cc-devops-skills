@@ -34,14 +34,12 @@ stages:
   - template: templates/deploy-template.yml
     parameters:
       environment: 'staging'
-      dependsOn:
-        - Build
       stageCondition: 'succeeded()'
       azureSubscription: $(azureSubscription)
       appName: '$(appNameBase)-staging'
       appType: 'webAppLinux'
       artifactName: 'webapp'
-      approvalRequired: false
+      approvalReminder: false
 
   # Deploy to production using template (only from main branch)
   - template: templates/deploy-template.yml
@@ -54,4 +52,4 @@ stages:
       appName: '$(appNameBase)-prod'
       appType: 'webAppLinux'
       artifactName: 'webapp'
-      approvalRequired: true
+      approvalReminder: true

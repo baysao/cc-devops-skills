@@ -54,8 +54,11 @@ print_skipped() {
 # Usage information
 usage() {
     cat << EOF
-Usage: ${SCRIPT_NAME} [MAKEFILE] [TARGETS...]
-       ${SCRIPT_NAME} [TARGETS...]
+Usage: ${SCRIPT_NAME} [OPTIONS] [MAKEFILE] [TARGETS...]
+       ${SCRIPT_NAME} [OPTIONS] [TARGETS...]
+       ${SCRIPT_NAME} [OPTIONS] --file MAKEFILE [TARGETS...]
+       ${SCRIPT_NAME} [OPTIONS] [MAKEFILE] --targets TARGET [TARGET...]
+       ${SCRIPT_NAME} [OPTIONS] --file MAKEFILE --targets TARGET [TARGET...]
 
 Add standard GNU targets to an existing Makefile.
 
@@ -75,15 +78,19 @@ Available Targets:
     dist        Create distribution tarball
 
 Options:
-    -h, --help  Show this help message
-    -l, --list  List available targets
-    -n, --dry-run  Show what would be added without modifying
+    -h, --help      Show this help message
+    -l, --list      List available targets
+    -n, --dry-run   Show what would be added without modifying
+    --file PATH     Explicit Makefile path
+    --targets ...   Explicit target mode (consume target names)
 
 Examples:
     ${SCRIPT_NAME}                          # Add all missing targets to ./Makefile
     ${SCRIPT_NAME} build.mk                 # Add all targets to build.mk
     ${SCRIPT_NAME} Makefile clean test      # Add only clean and test targets
     ${SCRIPT_NAME} clean test               # Add clean and test to ./Makefile
+    ${SCRIPT_NAME} --file custom.mk test    # Add test target to custom.mk
+    ${SCRIPT_NAME} --targets clean test     # Force target-mode on ./Makefile
     ${SCRIPT_NAME} -n Makefile install      # Preview install target addition
 
 EOF
@@ -336,8 +343,13 @@ VERSION := 1.0.0
 # Main function
 main() {
     local dry_run=0
+    local makefile_path="Makefile"
+    local explicit_file=0
+    local explicit_targets=0
+    local -a targets=()
+    local -a positional=()
 
-    # Parse options
+    # Parse options and positional args.
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
@@ -352,31 +364,91 @@ main() {
                 dry_run=1
                 shift
                 ;;
+            --file)
+                if [[ $# -lt 2 ]]; then
+                    print_error "--file requires a path argument"
+                    exit 1
+                fi
+                makefile_path="$2"
+                explicit_file=1
+                shift 2
+                ;;
+            --targets)
+                explicit_targets=1
+                shift
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --|--file|--targets|-h|--help|-l|--list|-n|--dry-run)
+                            break
+                            ;;
+                        -*)
+                            print_error "Unknown option: $1"
+                            usage
+                            exit 1
+                            ;;
+                        *)
+                            targets+=("$1")
+                            shift
+                            ;;
+                    esac
+                done
+                ;;
+            --)
+                shift
+                while [[ $# -gt 0 ]]; do
+                    positional+=("$1")
+                    shift
+                done
+                ;;
             -*)
                 print_error "Unknown option: $1"
                 usage
                 exit 1
                 ;;
             *)
-                break
+                positional+=("$1")
+                shift
                 ;;
         esac
     done
 
-    local makefile_path="Makefile"
-    local -a targets=()
-
-    # Parse positional args:
-    # - If first arg is a known target, use default Makefile and treat all args as targets.
-    # - Otherwise treat first arg as Makefile path and remaining args as targets.
-    if [[ $# -gt 0 ]]; then
-        if is_known_target "$1"; then
-            targets=("$@")
+    # Resolve positional args with backward compatibility for unambiguous usage.
+    if [[ ${#positional[@]} -gt 0 ]]; then
+        if [[ $explicit_targets -eq 1 ]]; then
+            if [[ $explicit_file -eq 1 ]]; then
+                print_error "Unexpected positional args with --file and --targets"
+                print_error "Use: ${SCRIPT_NAME} --file <path> --targets <target...>"
+                exit 1
+            fi
+            if [[ ${#positional[@]} -gt 1 ]]; then
+                print_error "Too many positional args with --targets"
+                print_error "Use: ${SCRIPT_NAME} [--file <path>] --targets <target...>"
+                exit 1
+            fi
+            makefile_path="${positional[0]}"
+            explicit_file=1
+        elif [[ $explicit_file -eq 1 ]]; then
+            targets+=("${positional[@]}")
         else
-            makefile_path="$1"
-            shift
-            targets=("$@")
+            if is_known_target "${positional[0]}"; then
+                if [[ -e "${positional[0]}" ]]; then
+                    print_error "Ambiguous input '${positional[0]}': matches a target and existing path."
+                    print_error "Use --file <path> or --targets <target...> explicitly."
+                    exit 2
+                fi
+                targets=("${positional[@]}")
+            else
+                makefile_path="${positional[0]}"
+                if [[ ${#positional[@]} -gt 1 ]]; then
+                    targets=("${positional[@]:1}")
+                fi
+            fi
         fi
+    fi
+
+    if [[ $explicit_targets -eq 1 ]] && [[ ${#targets[@]} -eq 0 ]]; then
+        print_error "--targets requires at least one target name"
+        exit 1
     fi
 
     # Default target set when none explicitly requested

@@ -6,6 +6,7 @@ This script generates a Declarative Jenkinsfile with specified configuration.
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +17,21 @@ from common_patterns import PipelinePatterns, StageTemplates, PostConditions, En
 from syntax_helpers import DeclarativeSyntax, FormattingHelpers, GroovySyntax, ValidationHelpers
 
 
+_INLINE_YAML_KEY_PATTERN = re.compile(r'^\s*[\w.\-"\']+\s*:\s*.*$')
+
+
+def _looks_like_inline_yaml(value):
+    """Return True if the input resembles inline YAML content."""
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if '\n' in value:
+        return True
+    if stripped.startswith(('---', '{', '[')):
+        return True
+    return bool(_INLINE_YAML_KEY_PATTERN.match(stripped))
+
+
 def resolve_k8s_yaml(k8s_yaml_value):
     """Resolve --k8s-yaml as either inline YAML or a path to an existing file."""
     if not k8s_yaml_value:
@@ -23,13 +39,14 @@ def resolve_k8s_yaml(k8s_yaml_value):
 
     candidate_path = Path(k8s_yaml_value).expanduser()
     if candidate_path.is_file():
-        return candidate_path.read_text()
+        return candidate_path.read_text(encoding='utf-8')
 
-    looks_like_yaml_path = candidate_path.suffix in {'.yaml', '.yml'} and '\n' not in k8s_yaml_value
-    if looks_like_yaml_path and not candidate_path.exists():
-        raise ValueError(f"--k8s-yaml file does not exist: {k8s_yaml_value}")
+    if _looks_like_inline_yaml(k8s_yaml_value):
+        return k8s_yaml_value
 
-    return k8s_yaml_value
+    raise ValueError(
+        f"--k8s-yaml must be inline YAML content or an existing file path: {k8s_yaml_value}"
+    )
 
 
 class DeclarativePipelineGenerator:
@@ -306,7 +323,7 @@ Examples:
     parser.add_argument('--dockerfile', default='Dockerfile',
                         help='Dockerfile name (for --agent dockerfile)')
     parser.add_argument('--k8s-yaml', default='',
-                        help='Kubernetes YAML (inline) or path to an existing .yaml/.yml file')
+                        help='Kubernetes YAML (inline) or path to an existing file')
 
     # Build configuration
     parser.add_argument('--build-tool', default='maven',

@@ -119,7 +119,8 @@ parameters:
 stages:
 - stage: Deploy_${{ parameters.environment }}
   displayName: 'Deploy to ${{ parameters.environment }}'
-  dependsOn: ${{ parameters.dependsOn }}
+  ${{ if gt(length(parameters.dependsOn), 0) }}:
+    dependsOn: ${{ parameters.dependsOn }}
   jobs:
   - deployment: Deploy
     displayName: 'Deploy Application'
@@ -141,12 +142,12 @@ stages:
 - template: templates/deploy-stage.yml
   parameters:
     environment: 'staging'
-    dependsOn: Build
 
 - template: templates/deploy-stage.yml
   parameters:
     environment: 'production'
-    dependsOn: Build
+    dependsOn:
+    - Deploy_staging
 ```
 
 ### 4. Variable Templates
@@ -502,7 +503,7 @@ stages:
 # Parameters:
 #   environment: Target environment (dev, staging, prod)
 #   version: Application version to deploy
-#   approvalRequired: Whether manual approval is needed
+#   approvalReminder: Show informational reminder to configure environment approvals/checks
 
 parameters:
 - name: environment
@@ -514,11 +515,13 @@ parameters:
   default: '$(Build.BuildId)'
   displayName: 'Application Version'
 
-- name: approvalRequired
+- name: approvalReminder
   type: boolean
   default: true
-  displayName: 'Require Manual Approval'
+  displayName: 'Show Approval Reminder'
 ```
+
+Environment approvals/checks are enforced in Azure DevOps Environment settings, not by a YAML boolean parameter.
 
 ### 2. Default Values
 

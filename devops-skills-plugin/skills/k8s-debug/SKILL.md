@@ -1,6 +1,6 @@
 ---
 name: k8s-debug
-description: Comprehensive Kubernetes debugging and troubleshooting toolkit. Use this skill when diagnosing Kubernetes cluster issues, debugging failing pods, investigating network connectivity problems, analyzing resource usage, troubleshooting deployments, or performing cluster health checks.
+description: Diagnose and fix Kubernetes pods, CrashLoopBackOff, Pending, DNS, networking, storage, and rollout failures with kubectl.
 ---
 
 # Kubernetes Debugging Skill
@@ -95,9 +95,17 @@ Load only the section needed for the observed symptom.
 
 | Script | Purpose | Required args | Optional args | Output | Fallback behavior |
 | --- | --- | --- | --- | --- | --- |
-| `./scripts/cluster_health.sh` | Cluster-wide health snapshot (nodes, workloads, events, common failure states) | None | `K8S_REQUEST_TIMEOUT` env var | Sectioned report to stdout | Continues when checks fail; warns when `jq`/metrics are unavailable |
-| `./scripts/network_debug.sh` | Pod-centric network and DNS diagnostics | `<pod-name>` (`<namespace>` defaults to `default`) | `K8S_REQUEST_TIMEOUT` env var | Sectioned report to stdout | Continues through non-critical failures; prints warnings for missing permissions/tools |
+| `./scripts/cluster_health.sh` | Cluster-wide health snapshot (nodes, workloads, events, common failure states) | None | `--strict`, `K8S_REQUEST_TIMEOUT` env var | Sectioned report to stdout | Continues on check failures, tracks them in summary and exit code |
+| `./scripts/network_debug.sh` | Pod-centric network and DNS diagnostics | `<pod-name>` (`<namespace>` defaults to `default`) | `--strict`, `--insecure`, `K8S_REQUEST_TIMEOUT` env var | Sectioned report to stdout | Uses secure API probe by default; insecure TLS requires explicit `--insecure` |
 | `./scripts/pod_diagnostics.py` | Deep pod diagnostics (status, describe, YAML, events, per-container logs, node context) | `<pod-name>` | `-n/--namespace`, `-o/--output` | Sectioned report to stdout or file | Fails fast on missing access; skips optional metrics/log blocks with clear messages |
+
+### Script Exit Codes
+
+`./scripts/cluster_health.sh` and `./scripts/network_debug.sh` share the same contract:
+
+- `0`: checks completed with no check failures (warnings allowed unless `--strict` is set).
+- `1`: one or more checks failed, or warnings occurred in `--strict` mode.
+- `2`: blocked preconditions (for example: missing `kubectl`, no active context, inaccessible namespace/pod).
 
 ## Deterministic Debugging Workflow
 
@@ -172,6 +180,9 @@ Use `./scripts/network_debug.sh` for connectivity issues:
 
 ```bash
 ./scripts/network_debug.sh <namespace> <pod-name>
+# or force warning sensitivity / insecure TLS only when explicitly needed:
+./scripts/network_debug.sh --strict <namespace> <pod-name>
+./scripts/network_debug.sh --insecure <namespace> <pod-name>
 ```
 
 This script analyzes:

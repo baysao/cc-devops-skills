@@ -10,10 +10,11 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 
 class FluentBitValidator:
@@ -190,6 +191,7 @@ class FluentBitValidator:
                         "type": section_name,
                         "line": i,
                         "params": {},
+                        "param_entries": [],
                     }
                     self.sections.append(current_section)
                     continue
@@ -205,7 +207,15 @@ class FluentBitValidator:
                     self.errors.append(f"Line {i}: Malformed key-value pair '{stripped}'")
                     continue
 
-                current_section["params"][key.lower()] = {
+                normalized_key = key.lower()
+                current_section["param_entries"].append(
+                    {
+                        "key": normalized_key,
+                        "value": value,
+                        "line": i,
+                    }
+                )
+                current_section["params"][normalized_key] = {
                     "value": value,
                     "line": i,
                 }
@@ -906,16 +916,33 @@ class FluentBitValidator:
         params = section["params"]
         generated = set()
 
-        for key, meta in params.items():
-            if not key.lower().startswith("rule"):
+        param_entries = section.get("param_entries")
+        if not param_entries:
+            # Backward compatibility for section objects created in tests/tools.
+            param_entries = [
+                {"key": key, "value": meta["value"], "line": meta["line"]}
+                for key, meta in params.items()
+            ]
+
+        for entry in param_entries:
+            key = entry["key"]
+            if not key.startswith("rule"):
                 continue
 
-            rule = meta["value"].strip()
-            parts = rule.split()
-            if len(parts) < 3:
+            rule = entry["value"].strip()
+            try:
+                parts = shlex.split(rule)
+            except ValueError as exc:
                 self.warnings.append(
-                    f"Line {meta['line']}: [FILTER rewrite_tag] Rule should be "
-                    f"'$KEY REGEX NEW_TAG KEEP'"
+                    f"Line {entry['line']}: [FILTER rewrite_tag] invalid Rule syntax: {exc}"
+                )
+                continue
+
+            # Rule format: $KEY REGEX NEW_TAG KEEP [AND_COMBINE]
+            if len(parts) < 4:
+                self.warnings.append(
+                    f"Line {entry['line']}: [FILTER rewrite_tag] Rule should be "
+                    f"'$KEY REGEX NEW_TAG KEEP [AND_COMBINE]'"
                 )
                 continue
 
@@ -954,22 +981,57 @@ class FluentBitValidator:
                 )
                 return False
 
+            overlap_unknown = False
             for tag in tags:
-                for candidate in self._sample_tags_from_pattern(tag):
-                    if regex.match(candidate):
-                        return True
+                overlap = self._tag_pattern_vs_regex(tag, regex)
+                if overlap is True:
+                    return True
+                if overlap is None:
+                    overlap_unknown = True
+
+            if overlap_unknown:
+                descriptor = self._match_descriptor(params)
+                if descriptor:
+                    self.recommendations.append(
+                        f"Line {section['line']}: [{section_type}] {descriptor} overlap with wildcard tags "
+                        f"is ambiguous; verify with Fluent Bit dry-run if strict routing is required"
+                    )
+                return True
 
         return not has_match and not has_regex
+
+    def _tag_pattern_vs_regex(
+        self, tag_pattern: str, regex: re.Pattern
+    ) -> Optional[bool]:
+        """
+        Compare a wildcard tag pattern against Match_Regex.
+
+        Returns:
+            True: overlap found
+            False: provably disjoint
+            None: overlap unknown
+        """
+        if "*" not in tag_pattern:
+            return regex.match(tag_pattern) is not None
+
+        for candidate in self._sample_tags_from_pattern(tag_pattern):
+            if regex.match(candidate):
+                return True
+
+        return None
 
     def _sample_tags_from_pattern(self, pattern: str) -> List[str]:
         """Generate representative sample tags from wildcard patterns."""
         if "*" not in pattern:
             return [pattern]
 
-        return [
-            pattern.replace("*", "sample"),
-            pattern.replace("*", "x"),
-        ]
+        samples = []
+        for token in ["sample", "x", "0", "123", "prod-1", "_", ""]:
+            sample = pattern.replace("*", token)
+            if sample not in samples:
+                samples.append(sample)
+
+        return samples
 
     def _tag_patterns_overlap(self, left: str, right: str) -> bool:
         """Approximate overlap check for two wildcard-style tag patterns."""

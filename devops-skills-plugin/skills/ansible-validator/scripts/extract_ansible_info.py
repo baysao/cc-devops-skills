@@ -39,6 +39,19 @@ class AnsibleInfoExtractor:
         'seboolean', 'at', 'acl', 'synchronize',
     }
 
+    # Keys that indicate a top-level playbook list (not a plain task file).
+    PLAYBOOK_KEYS = {
+        'hosts', 'tasks', 'pre_tasks', 'post_tasks', 'roles', 'handlers',
+        'import_playbook',
+    }
+
+    # Play-level keys that should never be treated as task modules.
+    PLAY_ONLY_KEYS = {
+        'hosts', 'tasks', 'pre_tasks', 'post_tasks', 'roles', 'handlers',
+        'gather_facts', 'vars_files', 'vars_prompt', 'strategy', 'serial',
+        'max_fail_percentage', 'any_errors_fatal', 'import_playbook',
+    }
+
     def __init__(self, path: str):
         self.path = Path(path)
         self.modules: Set[str] = set()
@@ -113,14 +126,17 @@ class AnsibleInfoExtractor:
                 return
 
             if isinstance(content, list):
-                # Distinguish a playbook (list of plays with 'hosts') from a
-                # task file (list of task dicts without 'hosts').
-                first = content[0] if content else {}
-                if isinstance(first, dict) and 'hosts' in first:
-                    # It's a playbook
+                # Distinguish a playbook from a plain task file by scanning
+                # all list entries, not only the first one.
+                if self._looks_like_playbook(content):
                     for play in content:
-                        if isinstance(play, dict):
-                            self._extract_from_play(play)
+                        if not isinstance(play, dict):
+                            continue
+                        # Top-level import_playbook entries are playbook
+                        # includes, not task module invocations.
+                        if 'import_playbook' in play:
+                            continue
+                        self._extract_from_play(play)
                 else:
                     # It's a task file (tasks/main.yml, handlers/main.yml, etc.)
                     self._extract_from_task_list(content)
@@ -133,6 +149,15 @@ class AnsibleInfoExtractor:
             self.errors.append(f"YAML error in {file_path}: {str(e)}")
         except Exception as e:
             self.errors.append(f"Error processing {file_path}: {str(e)}")
+
+    def _looks_like_playbook(self, items: List[Any]) -> bool:
+        """Detect whether a top-level YAML list is a playbook."""
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if any(key in item for key in self.PLAYBOOK_KEYS):
+                return True
+        return False
 
     def _process_requirements(self, req_file: Path):
         """Process requirements.yml for collection versions"""
@@ -206,6 +231,8 @@ class AnsibleInfoExtractor:
                           'become', 'become_user', 'notify', 'tags', 'vars',
                           'changed_when', 'failed_when', 'ignore_errors',
                           'block', 'rescue', 'always', 'delegate_to']:
+                    continue
+                if key in self.PLAY_ONLY_KEYS:
                     continue
 
                 # Check for blocks

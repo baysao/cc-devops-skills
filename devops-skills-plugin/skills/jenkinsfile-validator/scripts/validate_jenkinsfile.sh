@@ -11,6 +11,9 @@
 #   --best-practices    Run only best practices check
 #   --no-security       Skip security checks
 #   --no-best-practices Skip best practices check
+#   --assume-declarative Force declarative syntax mode for unknown files
+#   --assume-scripted   Force scripted syntax mode for unknown files
+#   --strict-unknown    Fail when pipeline type cannot be auto-detected (default)
 #   --strict            Fail on warnings
 #   -h, --help          Show this help message
 #
@@ -42,6 +45,8 @@ RUN_SYNTAX=true
 RUN_SECURITY=true
 RUN_BEST_PRACTICES=true
 STRICT_MODE=false
+STRICT_UNKNOWN=true
+ASSUME_TYPE=""
 
 # Counters
 TOTAL_ERRORS=0
@@ -60,12 +65,16 @@ Options:
   --best-practices    Run only best practices check
   --no-security       Skip security checks
   --no-best-practices Skip best practices check
+  --assume-declarative Force declarative syntax mode for unknown files
+  --assume-scripted   Force scripted syntax mode for unknown files
+  --strict-unknown    Fail when type cannot be auto-detected (default)
   --strict            Fail on warnings (treat warnings as errors)
   -h, --help          Show this help message
 
 Examples:
   $(basename "$0") Jenkinsfile                    # Full validation
   $(basename "$0") --syntax-only Jenkinsfile      # Syntax only
+  $(basename "$0") --assume-scripted file.groovy  # Explicit override for unknown type
   $(basename "$0") --strict Jenkinsfile           # Fail on warnings
   $(basename "$0") --no-security Jenkinsfile      # Skip security scan
 
@@ -159,6 +168,29 @@ count_error_warning_lines() {
     echo "${errors}:${warnings}"
 }
 
+count_runner_error_lines() {
+    local output=$1
+    local clean_output
+    clean_output=$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g')
+    printf '%s\n' "$clean_output" | grep -E -c '^ERROR \[Runner\]:' || true
+}
+
+ensure_runner_failure_is_counted() {
+    local errors=$1
+    local status=$2
+    local output=$3
+
+    if [ "$status" -gt 1 ]; then
+        local runner_errors
+        runner_errors=$(count_runner_error_lines "$output")
+        if [ "$runner_errors" -eq 0 ]; then
+            errors=$((errors + 1))
+        fi
+    fi
+
+    echo "$errors"
+}
+
 count_info_lines() {
     local output=$1
     local clean_output
@@ -195,14 +227,26 @@ detect_pipeline_type() {
 # Run syntax validation based on pipeline type
 run_syntax_validation() {
     local file=$1
-    local type=$2
+    local detected_type=$2
+    local type=$detected_type
     local errors=0
     local warnings=0
 
     print_section "1. Syntax Validation"
 
+    if [ "$detected_type" == "unknown" ] && [ -n "$ASSUME_TYPE" ]; then
+        type="$ASSUME_TYPE"
+        echo -e "${BLUE}Pipeline type could not be auto-detected.${NC}"
+        echo -e "${BLUE}Using assumed pipeline type: ${BOLD}$ASSUME_TYPE${NC}"
+        echo ""
+    fi
+
     if [ "$type" == "declarative" ]; then
-        echo -e "Pipeline type: ${GREEN}Declarative${NC}"
+        if [ "$detected_type" == "unknown" ] && [ -n "$ASSUME_TYPE" ]; then
+            echo -e "Pipeline type: ${GREEN}Declarative (assumed)${NC}"
+        else
+            echo -e "Pipeline type: ${GREEN}Declarative${NC}"
+        fi
         echo ""
 
         local output=""
@@ -217,11 +261,13 @@ run_syntax_validation() {
         counts=$(count_error_warning_lines "$output")
         errors=${counts%%:*}
         warnings=${counts##*:}
-        if [ "$script_status" -gt 1 ]; then
-            errors=$((errors + 1))
-        fi
+        errors=$(ensure_runner_failure_is_counted "$errors" "$script_status" "$output")
     elif [ "$type" == "scripted" ]; then
-        echo -e "Pipeline type: ${GREEN}Scripted${NC}"
+        if [ "$detected_type" == "unknown" ] && [ -n "$ASSUME_TYPE" ]; then
+            echo -e "Pipeline type: ${GREEN}Scripted (assumed)${NC}"
+        else
+            echo -e "Pipeline type: ${GREEN}Scripted${NC}"
+        fi
         echo ""
 
         local output=""
@@ -236,73 +282,18 @@ run_syntax_validation() {
         counts=$(count_error_warning_lines "$output")
         errors=${counts%%:*}
         warnings=${counts##*:}
-        if [ "$script_status" -gt 1 ]; then
-            errors=$((errors + 1))
-        fi
+        errors=$(ensure_runner_failure_is_counted "$errors" "$script_status" "$output")
     else
-        echo -e "${YELLOW}Warning: Could not determine pipeline type${NC}"
-        echo "Attempting both validators..."
-        echo ""
-
-        local ran_any=false
-        local declarative_errors=999999
-        local declarative_warnings=999999
-        local scripted_errors=999999
-        local scripted_warnings=999999
-
-        echo -e "${BLUE}Trying Declarative validation:${NC}"
-        local declarative_output=""
-        local declarative_status=0
-        set +e
-        declarative_output=$(run_validator_script "$SCRIPT_DIR/validate_declarative.sh" "$file")
-        declarative_status=$?
-        set -e
-        echo "$declarative_output"
-        if [ "$declarative_status" -ne 127 ]; then
-            ran_any=true
-            local decl_counts
-            decl_counts=$(count_error_warning_lines "$declarative_output")
-            declarative_errors=${decl_counts%%:*}
-            declarative_warnings=${decl_counts##*:}
-            if [ "$declarative_status" -gt 1 ]; then
-                declarative_errors=$((declarative_errors + 1))
-            fi
-        fi
-
-        echo ""
-        echo -e "${BLUE}Trying Scripted validation:${NC}"
-        local scripted_output=""
-        local scripted_status=0
-        set +e
-        scripted_output=$(run_validator_script "$SCRIPT_DIR/validate_scripted.sh" "$file")
-        scripted_status=$?
-        set -e
-        echo "$scripted_output"
-        if [ "$scripted_status" -ne 127 ]; then
-            ran_any=true
-            local scr_counts
-            scr_counts=$(count_error_warning_lines "$scripted_output")
-            scripted_errors=${scr_counts%%:*}
-            scripted_warnings=${scr_counts##*:}
-            if [ "$scripted_status" -gt 1 ]; then
-                scripted_errors=$((scripted_errors + 1))
-            fi
-        fi
-
-        if [ "$ran_any" == false ]; then
-            echo -e "${RED}ERROR [Runner]: No syntax validators are available.${NC}"
+        if [ "$STRICT_UNKNOWN" == true ]; then
+            echo -e "${RED}ERROR [TypeDetection]: Unable to classify file as Declarative or Scripted pipeline.${NC}"
+            echo "HINT: no pipeline markers detected."
+            echo "HINT: use --assume-declarative or --assume-scripted only when intentional."
             errors=1
             warnings=0
-        elif [ "$scripted_errors" -lt "$declarative_errors" ] || { [ "$scripted_errors" -eq "$declarative_errors" ] && [ "$scripted_warnings" -lt "$declarative_warnings" ]; }; then
-            errors=$scripted_errors
-            warnings=$scripted_warnings
-            echo ""
-            echo -e "${BLUE}Using scripted result as best match for unknown pipeline type.${NC}"
         else
-            errors=$declarative_errors
-            warnings=$declarative_warnings
-            echo ""
-            echo -e "${BLUE}Using declarative result as best match for unknown pipeline type.${NC}"
+            echo -e "${RED}ERROR [TypeDetection]: Unknown pipeline type handling is disabled by policy.${NC}"
+            errors=1
+            warnings=0
         fi
     fi
 
@@ -347,9 +338,7 @@ run_security_scan() {
         errors=${counts%%:*}
         warnings=${counts##*:}
         info=$(count_info_lines "$output")
-        if [ "$script_status" -gt 1 ]; then
-            errors=$((errors + 1))
-        fi
+        errors=$(ensure_runner_failure_is_counted "$errors" "$script_status" "$output")
     else
         echo -e "${YELLOW}Warning: common_validation.sh not found or not readable, skipping security scan${NC}"
     fi
@@ -394,9 +383,7 @@ run_best_practices() {
         counts=$(count_error_warning_lines "$output")
         errors=${counts%%:*}
         warnings=${counts##*:}
-        if [ "$script_status" -gt 1 ]; then
-            errors=$((errors + 1))
-        fi
+        errors=$(ensure_runner_failure_is_counted "$errors" "$script_status" "$output")
     else
         echo -e "${YELLOW}Warning: best_practices.sh not found or not readable, skipping best practices check${NC}"
     fi
@@ -524,6 +511,18 @@ parse_args() {
                 ;;
             --strict)
                 STRICT_MODE=true
+                shift
+                ;;
+            --assume-declarative)
+                ASSUME_TYPE="declarative"
+                shift
+                ;;
+            --assume-scripted)
+                ASSUME_TYPE="scripted"
+                shift
+                ;;
+            --strict-unknown)
+                STRICT_UNKNOWN=true
                 shift
                 ;;
             -h|--help)

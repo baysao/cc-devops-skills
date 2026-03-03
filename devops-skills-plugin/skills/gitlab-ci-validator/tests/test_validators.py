@@ -104,7 +104,7 @@ class TestBug1StartIn(unittest.TestCase):
         _, result = _run_syntax(self._PIPELINE)
         unknown_kw_errors = [
             issue for issue in result.get("issues", [])
-            if issue["rule"] == "unknown-rule-keyword"
+            if issue["rule"] == "rule-unknown-keyword"
             and "start_in" in issue["message"]
         ]
         self.assertEqual(
@@ -153,7 +153,7 @@ class TestBug2FallbackKeys(unittest.TestCase):
         _, result = _run_syntax(self._PIPELINE)
         unknown_kw_errors = [
             issue for issue in result.get("issues", [])
-            if issue["rule"] == "unknown-cache-keyword"
+            if issue["rule"] == "cache-unknown-keyword"
             and "fallback_keys" in issue["message"]
         ]
         self.assertEqual(
@@ -226,6 +226,23 @@ class TestGap1ImageNoTag(unittest.TestCase):
             f"Digest-pinned image must not produce tag issues, got: {tag_issues}",
         )
 
+    def test_digest_pinned_image_keeps_unknown_registry_check(self):
+        """Digest pinning must not suppress unknown-registry warnings."""
+        _, result = _run_security("""
+            build:
+              image: registry.internal.example/team/app@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+              script:
+                - echo hello
+        """)
+        rules = _issue_rules(result)
+        self.assertIn(
+            "image-unknown-registry",
+            rules,
+            "Expected unknown-registry warning even when image is digest pinned",
+        )
+        self.assertNotIn("image-no-tag", rules)
+        self.assertNotIn("image-latest-tag", rules)
+
     def test_image_with_explicit_tag_is_not_flagged(self):
         """'ubuntu:22.04' (explicit tag) must not produce any image-no-tag issue."""
         _, result = _run_security("""
@@ -277,10 +294,10 @@ class TestGap2EchoSecrets(unittest.TestCase):
               script:
                 - echo $DB_PASSWORD
         """)
-        rules = _issue_rules(result)
-        self.assertTrue(
-            any("secret" in r or "echo" in r for r in rules),
-            f"Expected secret-echo issue for 'echo $DB_PASSWORD', got rules: {rules}",
+        self.assertIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Expected secret-in-logs for 'echo $DB_PASSWORD'",
         )
 
     def test_echo_my_secret_is_detected(self):
@@ -291,10 +308,10 @@ class TestGap2EchoSecrets(unittest.TestCase):
               script:
                 - echo $MY_SECRET
         """)
-        rules = _issue_rules(result)
-        self.assertTrue(
-            any("secret" in r or "echo" in r for r in rules),
-            f"Expected secret-echo issue for 'echo $MY_SECRET', got rules: {rules}",
+        self.assertIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Expected secret-in-logs for 'echo $MY_SECRET'",
         )
 
     def test_echo_brace_wrapped_token_is_detected(self):
@@ -305,10 +322,10 @@ class TestGap2EchoSecrets(unittest.TestCase):
               script:
                 - echo ${API_TOKEN}
         """)
-        rules = _issue_rules(result)
-        self.assertTrue(
-            any("secret" in r or "echo" in r for r in rules),
-            f"Expected secret-echo issue for 'echo ${{API_TOKEN}}', got rules: {rules}",
+        self.assertIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Expected secret-in-logs for 'echo ${API_TOKEN}'",
         )
 
     def test_echo_app_password_is_detected(self):
@@ -319,10 +336,38 @@ class TestGap2EchoSecrets(unittest.TestCase):
               script:
                 - echo $APP_PASSWORD
         """)
-        rules = _issue_rules(result)
-        self.assertTrue(
-            any("secret" in r or "echo" in r for r in rules),
-            f"Expected secret-echo issue for 'echo $APP_PASSWORD', got rules: {rules}",
+        self.assertIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Expected secret-in-logs for 'echo $APP_PASSWORD'",
+        )
+
+    def test_echo_ssh_private_key_is_detected(self):
+        """'echo $SSH_PRIVATE_KEY' must be flagged."""
+        _, result = _run_security("""
+            build:
+              image: alpine:3.18
+              script:
+                - echo $SSH_PRIVATE_KEY
+        """)
+        self.assertIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Expected secret-in-logs for 'echo $SSH_PRIVATE_KEY'",
+        )
+
+    def test_echo_signing_key_is_detected(self):
+        """'echo ${SIGNING_KEY}' must be flagged."""
+        _, result = _run_security("""
+            build:
+              image: alpine:3.18
+              script:
+                - echo ${SIGNING_KEY}
+        """)
+        self.assertIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Expected secret-in-logs for 'echo ${SIGNING_KEY}'",
         )
 
     def test_echo_plain_var_is_not_flagged(self):
@@ -333,14 +378,24 @@ class TestGap2EchoSecrets(unittest.TestCase):
               script:
                 - echo $BUILD_VERSION
         """)
-        echo_secret_issues = [
-            i for i in result.get("issues", [])
-            if "BUILD_VERSION" in i.get("message", "")
-        ]
-        self.assertEqual(
-            echo_secret_issues,
-            [],
-            f"Non-secret variable must not be flagged: {echo_secret_issues}",
+        self.assertNotIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "Non-secret variable must not trigger secret-in-logs",
+        )
+
+    def test_echo_cache_key_is_not_flagged(self):
+        """'echo $CACHE_KEY' should not be treated as a secret by key-name matching."""
+        _, result = _run_security("""
+            build:
+              image: alpine:3.18
+              script:
+                - echo $CACHE_KEY
+        """)
+        self.assertNotIn(
+            "secret-in-logs",
+            _issue_rules(result),
+            "CACHE_KEY must stay excluded from secret-in-logs detection",
         )
 
 
