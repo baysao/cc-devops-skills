@@ -43,6 +43,46 @@ Add this to project-level `.claude/settings.json`:
 }
 ```
 
+## Drop-In GitHub Action Wrapper
+
+This repository also publishes a **drop-in wrapper** around `anthropics/claude-code-action@v1`.
+
+Replace:
+
+```yaml
+uses: anthropics/claude-code-action@v1
+```
+
+With:
+
+```yaml
+uses: akin-ozer/cc-devops-skills@v1
+```
+
+Behavior stays compatible with upstream `v1`, and DevOps skills are injected by default through:
+
+- Marketplace: `https://github.com/akin-ozer/cc-devops-skills.git`
+- Plugin: `devops-skills@akin-ozer`
+
+Tag policy:
+
+- `akin-ozer/cc-devops-skills@v1` tracks this wrapper's latest `v1.x.y` release.
+- The wrapper internally calls `anthropics/claude-code-action@v1` (tag), not a pinned SHA.
+
+To run as pure passthrough (no auto-injection):
+
+```yaml
+uses: akin-ozer/cc-devops-skills@v1
+with:
+  inject_devops_skills: "false"
+```
+
+Docs and examples:
+
+- Wrapper details: [`docs/drop-in-wrapper.md`](docs/drop-in-wrapper.md)
+- IaC PR review workflow: [`examples/github-actions/iac-pr-review.yml`](examples/github-actions/iac-pr-review.yml)
+- Compatibility drift check: [`scripts/check_upstream_action_surface.sh`](scripts/check_upstream_action_surface.sh)
+
 ## How people use this repo
 
 Most workflows are generator + validator loops.
@@ -176,8 +216,18 @@ helm plugin install https://github.com/databus23/helm-diff
 
 ```text
 cc-devops-skills/
+├── action.yml
 ├── README.md
 ├── LICENSE
+├── docs/
+│   └── drop-in-wrapper.md
+├── examples/
+│   └── github-actions/
+│       └── iac-pr-review.yml
+├── scripts/
+│   └── check_upstream_action_surface.sh
+├── .github/workflows/
+│   └── compat-check.yml
 └── devops-skills-plugin/
     ├── .claude-plugin/plugin.json
     └── skills/
